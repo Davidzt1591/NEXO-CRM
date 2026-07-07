@@ -5,7 +5,8 @@
  *   node scripts/generate-key.js --name "Analista" --role admin
  */
 
-const { initDb, createToken } = require('../src/database/db');
+require('dotenv').config({ path: require('path').resolve(__dirname, '..', '.env') });
+const { initDb, createToken, closeDb } = require('../src/database/db');
 
 // Basic CLI parser
 const args = process.argv.slice(2);
@@ -40,7 +41,7 @@ if (!validRoles.includes(role)) {
     await initDb();
 
     // 2. Generate and save token
-    const result = createToken({ name, role });
+    const result = await createToken({ name, role });
 
     console.log('\n🔑 ──────────────────────────────────────────────────────────────');
     console.log('   NEXO DASHBOARD TOKEN GENERADO EXITOSAMENTE');
@@ -52,9 +53,11 @@ if (!validRoles.includes(role)) {
     console.log('   ⚠️  IMPORTANTE: Copia este token ahora. No se volverá a mostrar.');
     console.log('   El dashboard requerirá este token para poder conectarse.\n');
 
+    closeDb();
     process.exit(0);
   } catch (err) {
     console.error('❌ Error al generar el token:', err.message);
+    try { closeDb(); } catch (_) {}
     process.exit(1);
   }
 })();

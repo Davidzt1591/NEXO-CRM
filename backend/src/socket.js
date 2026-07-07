@@ -3,18 +3,21 @@ const db    = require('./database/db');
 const whatsappAdapter = require('./services/whatsapp');
 
 function setupSockets(io, client, borrarSesion) {
-  // Authentication middleware for Sockets
-  io.use((socket, next) => {
+  io.use(async (socket, next) => {
     const token = socket.handshake.auth?.token || socket.handshake.query?.token;
     if (!token) {
       return next(new Error('Acceso no autorizado: Token ausente.'));
     }
-    const user = db.validateToken(token);
-    if (!user) {
-      return next(new Error('Acceso no autorizado: Token inválido o revocado.'));
+    try {
+      const user = await db.validateToken(token);
+      if (!user) {
+        return next(new Error('Acceso no autorizado: Token inválido o revocado.'));
+      }
+      socket.user = user;
+      next();
+    } catch (err) {
+      return next(new Error('Acceso no autorizado: Error de red con la base de datos.'));
     }
-    socket.user = user;
-    next();
   });
 
   io.on('connection', (socket) => {
@@ -183,21 +186,21 @@ function setupSockets(io, client, borrarSesion) {
     });
 
     // Load tickets
-    socket.on('get-tickets', () => {
-      const tickets = db.getTickets();
+    socket.on('get-tickets', async () => {
+      const tickets = await db.getTickets();
       socket.emit('tickets-list', tickets);
     });
 
     // Load messages for a ticket
-    socket.on('get-messages', (ticketId) => {
-      const messages = db.getMessages(ticketId);
+    socket.on('get-messages', async (ticketId) => {
+      const messages = await db.getMessages(ticketId);
       socket.emit('messages-list', messages);
     });
 
     // Close ticket
     socket.on('close-ticket', async (ticketId) => {
-      const ticketData = db.getTicketById(ticketId);
-      db.closeTicket(ticketId);
+      const ticketData = await db.getTicketById(ticketId);
+      await db.closeTicket(ticketId);
 
       if (ticketData?.telefono) {
         const despedida =
@@ -208,7 +211,7 @@ function setupSockets(io, client, borrarSesion) {
         try {
           await client.sendMessage(ticketData.telefono, despedida);
           const timestamp = new Date().toISOString();
-          db.saveMessage({ ticket_id: ticketId, chat_id: ticketData.telefono, body: despedida, from_user: false, is_bot: true });
+          await db.saveMessage({ ticket_id: ticketId, chat_id: ticketData.telefono, body: despedida, from_user: false, is_bot: true });
           io.emit('new-message', {
             chatId:    ticketData.telefono,
             ticketId,
@@ -229,17 +232,17 @@ function setupSockets(io, client, borrarSesion) {
     });
 
     // Delete ticket and chat permanently
-    socket.on('delete-chat', ({ contactKey, ticketId }) => {
+    socket.on('delete-chat', async ({ contactKey, ticketId }) => {
       console.log('🗑️ delete-chat recibido:', { contactKey, ticketId });
       if (ticketId) {
-        db.deleteTicket(ticketId); // cascades to messages via ON DELETE CASCADE
+        await db.deleteTicket(ticketId);
       }
       io.emit('chat-deleted', { contactKey });
     });
 
     // AI Copilot Endpoints
     socket.on('request-summary', async (ticketId) => {
-      const messages = db.getMessages(ticketId);
+      const messages = await db.getMessages(ticketId);
       if (!messages || messages.length === 0) {
         socket.emit('summary-error', { message: 'No hay mensajes para resumir' });
         return;
@@ -269,7 +272,7 @@ function setupSockets(io, client, borrarSesion) {
       let targetTicketId = ticketId;
 
       if (!targetTicketId && telefonoDestino) {
-        const ticket = db.createTicket({
+        const ticket = await db.createTicket({
           chat_id:        telefonoDestino,
           telefono:       telefonoDestino.replace(/@c\.us|@lid/g, ''),
           nombre_analista: store.sesiones[telefonoDestino]?.nombre || 'Usuario Derivado a Soporte',
@@ -281,11 +284,11 @@ function setupSockets(io, client, borrarSesion) {
 
       if (targetTicketId) {
         if (!telefonoDestino) {
-          const t = db.getTicketById(targetTicketId);
+          const t = await db.getTicketById(targetTicketId);
           if (t?.telefono) telefonoDestino = t.telefono;
         }
-        db.closeTicket(targetTicketId);
-        db.saveMessage({ ticket_id: targetTicketId, chat_id: telefonoDestino || '', body: mensajeDerivacion, from_user: false, is_bot: true });
+        await db.closeTicket(targetTicketId);
+        await db.saveMessage({ ticket_id: targetTicketId, chat_id: telefonoDestino || '', body: mensajeDerivacion, from_user: false, is_bot: true });
         io.emit('ticket-closed', { ticketId: targetTicketId });
       }
 
@@ -308,14 +311,14 @@ function setupSockets(io, client, borrarSesion) {
       }
     });
 
-    socket.on('get-stats', () => {
-      const stats = db.getStats();
+    socket.on('get-stats', async () => {
+      const stats = await db.getStats();
       socket.emit('stats-data', {
         total:   stats.total,
         open:    stats.open,
         closed:  stats.closed,
         today:   stats.today,
-        tmaMins: 0, // Extended stats can be added later
+        tmaMins: 0,
       });
     });
 

@@ -39,7 +39,7 @@ app.use('/', limiter);
 const { validateToken } = require('./src/database/db');
 
 // Auth middleware for API routes
-const apiAuth = (req, res, next) => {
+const apiAuth = async (req, res, next) => {
   // Exclude healthcheck from authorization
   if (req.path === '/health') return next();
 
@@ -54,13 +54,17 @@ const apiAuth = (req, res, next) => {
     return res.status(401).json({ error: 'Acceso no autorizado. Token ausente.' });
   }
 
-  const user = validateToken(token);
-  if (!user) {
-    return res.status(401).json({ error: 'Acceso no autorizado. Token inválido o revocado.' });
-  }
+  try {
+    const user = await validateToken(token);
+    if (!user) {
+      return res.status(401).json({ error: 'Acceso no autorizado. Token inválido o revocado.' });
+    }
 
-  req.user = user; // Attach user metadata to request object
-  next();
+    req.user = user; // Attach user metadata to request object
+    next();
+  } catch (err) {
+    return res.status(500).json({ error: 'Error de comunicación con la base de datos de seguridad.' });
+  }
 };
 
 app.use('/api', apiAuth);

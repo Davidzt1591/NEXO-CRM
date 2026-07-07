@@ -39,31 +39,35 @@ function estaEnHorarioLaboral() {
   return false;
 }
 
-// ── Session sync: memory ↔ SQLite ──────────────────────────────────────────
+// ── Session sync: memory ↔ Supabase ──────────────────────────────────────────
 
-function syncSessionToDb(chatId) {
+async function syncSessionToDb(chatId) {
   const s = store.sesiones[chatId];
   if (s) {
-    db.saveSession(chatId, s);
+    await db.saveSession(chatId, s);
   } else {
-    db.deleteSession(chatId);
+    await db.deleteSession(chatId);
   }
 }
 
-function loadSessionsFromDb() {
-  const rows = db.loadAllSessions();
-  for (const row of rows) {
-    store.sesiones[row.chat_id] = {
-      paso:      row.paso,
-      nombre:    row.nombre    || undefined,
-      empresa:   row.empresa   || undefined,
-      correo:    row.correo    || undefined,
-      situacion: row.situacion || undefined,
-      ticketId:  row.ticket_id || undefined,
-    };
-  }
-  if (rows.length > 0) {
-    console.log(`📥 ${rows.length} sesiones activas recuperadas desde la base de datos`);
+async function loadSessionsFromDb() {
+  try {
+    const rows = await db.loadAllSessions();
+    for (const row of rows) {
+      store.sesiones[row.chat_id] = {
+        paso:      row.paso,
+        nombre:    row.nombre    || undefined,
+        empresa:   row.empresa   || undefined,
+        correo:    row.correo    || undefined,
+        situacion: row.situacion || undefined,
+        ticketId:  row.ticket_id || undefined,
+      };
+    }
+    if (rows.length > 0) {
+      console.log(`📥 ${rows.length} sesiones activas recuperadas desde Supabase`);
+    }
+  } catch (err) {
+    console.error('❌ Error al cargar sesiones de Supabase:', err.message);
   }
 }
 
@@ -94,7 +98,7 @@ function setupWhatsApp(io) {
     let   savedId   = null;
 
     if (ticketId) {
-      const saved = db.saveMessage({
+      const saved = await db.saveMessage({
         ticket_id:    ticketId,
         chat_id:      cid,
         body:         texto,
@@ -203,7 +207,7 @@ function setupWhatsApp(io) {
 
     // Persist message if ticket exists
     if (sesion?.ticketId) {
-      db.saveMessage({
+      await db.saveMessage({
         ticket_id:    sesion.ticketId,
         chat_id:      chatId,
         body:         displayBody,
@@ -234,7 +238,7 @@ function setupWhatsApp(io) {
     // ── New session ──────────────────────────────────────────────────────
     if (!store.sesiones[chatId]) {
       store.sesiones[chatId] = { paso: 0 };
-      syncSessionToDb(chatId);
+      await syncSessionToDb(chatId);
       await respuestaBot(
         message,
         'Bienvenido al canal de soporte de Integraciones de *Magneto365*.\n\n' +
@@ -250,11 +254,11 @@ function setupWhatsApp(io) {
     if (s.paso === 0) {
       if (texto.toLowerCase().includes('si')) {
         s.paso = 1;
-        syncSessionToDb(chatId);
+        await syncSessionToDb(chatId);
         await respuestaBot(message, 'Entendido. Procederemos con el registro. Por favor, indíqueme su *Nombre Completo*:');
       } else {
         s.paso = 'filtro_no';
-        syncSessionToDb(chatId);
+        await syncSessionToDb(chatId);
         await respuestaBot(
           message,
           'Para orientarlo correctamente, por favor indíquenos:\n\n' +
@@ -277,7 +281,7 @@ function setupWhatsApp(io) {
           'Uno de nuestros asesores de soporte tomará tu caso y te contactará. ¡Feliz día! ✨'
         );
         delete store.sesiones[chatId];
-        syncSessionToDb(chatId);
+        await syncSessionToDb(chatId);
       } else if (texto === '2') {
         await respuestaBot(
           message,
@@ -287,7 +291,7 @@ function setupWhatsApp(io) {
           '¡Muchos éxitos en su búsqueda laboral! ✨'
         );
         delete store.sesiones[chatId];
-        syncSessionToDb(chatId);
+        await syncSessionToDb(chatId);
       } else {
         await respuestaBot(message, 'Por favor, responda *1* para Analista o *2* para Candidato.');
       }
@@ -298,19 +302,19 @@ function setupWhatsApp(io) {
     if (s.paso === 1) {
       s.nombre = texto;
       s.paso   = 2;
-      syncSessionToDb(chatId);
+      await syncSessionToDb(chatId);
       await respuestaBot(message, `Gracias, ${s.nombre}. Indíqueme el nombre de la *Empresa o Cliente* afectado:`);
 
     } else if (s.paso === 2) {
       s.empresa = texto;
       s.paso    = 3;
-      syncSessionToDb(chatId);
+      await syncSessionToDb(chatId);
       await respuestaBot(message, 'Proporcione su *Correo Electrónico Corporativo*:');
 
     } else if (s.paso === 3) {
       s.correo = texto;
       s.paso   = 4;
-      syncSessionToDb(chatId);
+      await syncSessionToDb(chatId);
       await respuestaBot(message, 'Describa detalladamente su *Requerimiento Técnico o Incidencia*:');
 
     } else if (s.paso === 4) {
@@ -321,8 +325,8 @@ function setupWhatsApp(io) {
         const prioridad = await analizarPrioridad(s.situacion);
         const phone     = realPhone || chatId.replace(/@c\.us|@lid/g, '');
 
-        // ── Save ticket to SQLite ──────────────────────────────────────
-        const ticket = db.createTicket({
+        // ── Save ticket to Supabase ──────────────────────────────────────
+        const ticket = await db.createTicket({
           chat_id:        chatId,
           telefono:       phone,
           nombre_analista: s.nombre,
@@ -334,7 +338,7 @@ function setupWhatsApp(io) {
 
         s.ticketId = ticket.id;
         s.paso     = 5;
-        syncSessionToDb(chatId);
+        await syncSessionToDb(chatId);
 
         io.emit('ticket-created', ticket);
 
@@ -354,7 +358,7 @@ function setupWhatsApp(io) {
           sfCaseId     = sfResult.id;
 
           // Update local ticket with SF reference
-          db.updateTicketSalesforce(ticket.id, { sf_case_id: sfCaseId, sf_case_number: sfCaseNumber });
+          await db.updateTicketSalesforce(ticket.id, { sf_case_id: sfCaseId, sf_case_number: sfCaseNumber });
 
           io.emit('sf-case-created', {
             contactKey:     String(ticket.id),
@@ -385,7 +389,7 @@ function setupWhatsApp(io) {
           '⚠️ Ocurrió un error al registrar su solicitud. Por favor intente nuevamente o contacte a soporte.mgt@magnetoglobal.com'
         );
         delete store.sesiones[chatId];
-        syncSessionToDb(chatId);
+        await syncSessionToDb(chatId);
       }
     }
   });

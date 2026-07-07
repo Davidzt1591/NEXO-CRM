@@ -1,318 +1,320 @@
 /**
- * NEXO — SQLite Database Module
- * Replaces Supabase. All data stays on-premise.
- * Uses sql.js (pure JavaScript, no native compilation needed).
+ * NEXO — Supabase Database Integration Module
+ * Secure Production Implementation with strict TLS/HTTPS.
  */
 
-const initSqlJs = require('sql.js');
-const path = require('path');
-const fs = require('fs');
+const { createClient } = require('@supabase/supabase-js');
 const crypto = require('crypto');
 
-const DB_PATH = path.resolve(__dirname, '..', '..', 'data', 'nexo.db');
-const DB_DIR  = path.dirname(DB_PATH);
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-let _db = null;
-
-// ── Persist DB to disk ─────────────────────────────────────────────────────
-function persistDb() {
-  if (!_db) return;
-  const data = _db.export();
-  fs.writeFileSync(DB_PATH, Buffer.from(data));
+if (!supabaseUrl || !supabaseKey) {
+  console.error('❌ Error: SUPABASE_URL o SUPABASE_ANON_KEY no configurados en .env');
 }
 
-// Auto-save every 30 seconds to prevent data loss
-let _persistInterval = null;
-
-// ── Schema ─────────────────────────────────────────────────────────────────
-const SCHEMA = `
-  CREATE TABLE IF NOT EXISTS tickets (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    chat_id         TEXT    NOT NULL,
-    telefono        TEXT,
-    nombre_analista TEXT,
-    nombre_empresa  TEXT,
-    correo          TEXT,
-    situacion       TEXT,
-    prioridad       TEXT,
-    status          TEXT    DEFAULT 'open',
-    sf_case_id      TEXT,
-    sf_case_number  TEXT,
-    created_at      TEXT    DEFAULT (datetime('now')),
-    closed_at       TEXT
-  );
-
-  CREATE TABLE IF NOT EXISTS messages (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    ticket_id     INTEGER,
-    chat_id       TEXT    NOT NULL,
-    body          TEXT,
-    from_user     INTEGER DEFAULT 0,
-    is_bot        INTEGER DEFAULT 0,
-    wa_message_id TEXT,
-    timestamp     TEXT    DEFAULT (datetime('now')),
-    FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE SET NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS bot_sessions (
-    chat_id    TEXT PRIMARY KEY,
-    paso       TEXT,
-    nombre     TEXT,
-    empresa    TEXT,
-    correo     TEXT,
-    situacion  TEXT,
-    ticket_id  INTEGER,
-    updated_at TEXT DEFAULT (datetime('now'))
-  );
-
-  CREATE TABLE IF NOT EXISTS dashboard_tokens (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    token_hash  TEXT    NOT NULL UNIQUE,
-    name        TEXT    NOT NULL,
-    role        TEXT    DEFAULT 'agent',
-    active      INTEGER DEFAULT 1,
-    created_at  TEXT    DEFAULT (datetime('now'))
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_messages_ticket    ON messages (ticket_id);
-  CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages (timestamp);
-  CREATE INDEX IF NOT EXISTS idx_tickets_status     ON tickets  (status);
-  CREATE INDEX IF NOT EXISTS idx_tickets_chat_id    ON tickets  (chat_id);
-`;
-
-// ── Init ───────────────────────────────────────────────────────────────────
-async function initDb() {
-  if (_db) return _db;
-
-  if (!fs.existsSync(DB_DIR)) {
-    fs.mkdirSync(DB_DIR, { recursive: true });
+// Strictly configured Supabase Client (No TLS reject bypass)
+const supabase = createClient(supabaseUrl, supabaseKey, {
+  auth: {
+    persistSession: false,
+    autoRefreshToken: false
   }
+});
 
-  const SQL = await initSqlJs();
+console.log('🌐 Conexión segura inicializada con Supabase URL:', supabaseUrl);
 
-  if (fs.existsSync(DB_PATH)) {
-    const fileBuffer = fs.readFileSync(DB_PATH);
-    _db = new SQL.Database(fileBuffer);
-    console.log('💾 SQLite DB cargada desde disco:', DB_PATH);
-  } else {
-    _db = new SQL.Database();
-    console.log('💾 SQLite DB nueva creada en:', DB_PATH);
-  }
-
-  _db.run(SCHEMA);
-  persistDb();
-
-  // Auto-save each 30 seconds
-  _persistInterval = setInterval(persistDb, 30_000);
-
-  return _db;
-}
-
-// ── Query helpers ──────────────────────────────────────────────────────────
-
-/**
- * Run a SELECT and return all rows as an array of objects.
- */
-function query(sql, params = []) {
-  const stmt = _db.prepare(sql);
-  stmt.bind(params);
-  const rows = [];
-  while (stmt.step()) {
-    rows.push(stmt.getAsObject());
-  }
-  stmt.free();
-  return rows;
-}
-
-/**
- * Run a single-row SELECT.
- */
-function queryOne(sql, params = []) {
-  const rows = query(sql, params);
-  return rows[0] || null;
-}
-
-/**
- * Run INSERT/UPDATE/DELETE. Returns lastInsertRowid for INSERTs.
- */
-function run(sql, params = []) {
-  _db.run(sql, params);
-  const meta = _db.exec('SELECT last_insert_rowid() as id');
-  const id = meta?.[0]?.values?.[0]?.[0] ?? null;
-  // Persist asynchronously to avoid blocking
-  setImmediate(persistDb);
-  return { id };
-}
-
-// ── Ticket Operations ──────────────────────────────────────────────────────
-
-function createTicket({ chat_id, telefono, nombre_analista, nombre_empresa, correo, situacion, prioridad }) {
-  const { id } = run(
-    `INSERT INTO tickets (chat_id, telefono, nombre_analista, nombre_empresa, correo, situacion, prioridad)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    [chat_id, telefono || null, nombre_analista || null, nombre_empresa || null,
-     correo || null, situacion || null, prioridad || null]
-  );
-  return queryOne('SELECT * FROM tickets WHERE id = ?', [id]);
-}
-
-function updateTicketSalesforce(id, { sf_case_id, sf_case_number }) {
-  run('UPDATE tickets SET sf_case_id = ?, sf_case_number = ? WHERE id = ?',
-    [sf_case_id, sf_case_number, id]);
-}
-
-function closeTicket(id) {
-  run(`UPDATE tickets SET status = 'closed', closed_at = datetime('now') WHERE id = ?`, [id]);
-}
-
-function getTickets() {
-  return query('SELECT * FROM tickets ORDER BY created_at DESC');
-}
-
-function getTicketById(id) {
-  return queryOne('SELECT * FROM tickets WHERE id = ?', [id]);
-}
-
-function deleteTicket(id) {
-  run('DELETE FROM tickets WHERE id = ?', [id]);
-}
-
-// ── Message Operations ─────────────────────────────────────────────────────
-
-function saveMessage({ ticket_id, chat_id, body, from_user, is_bot, wa_message_id }) {
-  const { id } = run(
-    `INSERT INTO messages (ticket_id, chat_id, body, from_user, is_bot, wa_message_id)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-    [ticket_id || null, chat_id, body || '', from_user ? 1 : 0, is_bot ? 1 : 0, wa_message_id || null]
-  );
-  return queryOne('SELECT * FROM messages WHERE id = ?', [id]);
-}
-
-function getMessages(ticketId) {
-  return query(
-    'SELECT * FROM messages WHERE ticket_id = ? ORDER BY timestamp ASC',
-    [ticketId]
-  );
-}
-
-// ── Session Operations ─────────────────────────────────────────────────────
-
-function getSession(chatId) {
-  const row = queryOne('SELECT * FROM bot_sessions WHERE chat_id = ?', [chatId]);
-  if (!row) return null;
-  return {
-    paso:      row.paso,
-    nombre:    row.nombre,
-    empresa:   row.empresa,
-    correo:    row.correo,
-    situacion: row.situacion,
-    ticketId:  row.ticket_id,
-  };
-}
-
-function saveSession(chatId, session) {
-  run(
-    `INSERT INTO bot_sessions (chat_id, paso, nombre, empresa, correo, situacion, ticket_id, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
-     ON CONFLICT(chat_id) DO UPDATE SET
-       paso       = excluded.paso,
-       nombre     = excluded.nombre,
-       empresa    = excluded.empresa,
-       correo     = excluded.correo,
-       situacion  = excluded.situacion,
-       ticket_id  = excluded.ticket_id,
-       updated_at = datetime('now')`,
-    [
-      chatId,
-      session.paso ?? null,
-      session.nombre ?? null,
-      session.empresa ?? null,
-      session.correo ?? null,
-      session.situacion ?? null,
-      session.ticketId ?? null,
-    ]
-  );
-}
-
-function deleteSession(chatId) {
-  run('DELETE FROM bot_sessions WHERE chat_id = ?', [chatId]);
-}
-
-function loadAllSessions() {
-  return query('SELECT * FROM bot_sessions');
-}
-
-// ── Stats ──────────────────────────────────────────────────────────────────
-
-function getStats() {
-  const total    = queryOne('SELECT COUNT(*) as n FROM tickets')?.n ?? 0;
-  const open     = queryOne("SELECT COUNT(*) as n FROM tickets WHERE status = 'open'")?.n ?? 0;
-  const closed   = queryOne("SELECT COUNT(*) as n FROM tickets WHERE status = 'closed'")?.n ?? 0;
-  const today    = queryOne("SELECT COUNT(*) as n FROM tickets WHERE date(created_at) = date('now')")?.n ?? 0;
-  return { total, open, closed, today };
-}
-
-// ── Cleanup (TTL) ──────────────────────────────────────────────────────────
-
-function cleanupOldMessages(ttlDays = 90) {
-  const result = run(
-    `DELETE FROM messages WHERE timestamp < datetime('now', ?)`,
-    [`-${ttlDays} days`]
-  );
-  console.log(`🧹 Cleanup: mensajes eliminados con más de ${ttlDays} días`);
-  return result;
-}
-
-function cleanupOldSessions(ttlDays = 7) {
-  run(
-    `DELETE FROM bot_sessions WHERE updated_at < datetime('now', ?)`,
-    [`-${ttlDays} days`]
-  );
-  console.log(`🧹 Cleanup: sesiones inactivas eliminadas con más de ${ttlDays} días`);
-}
-
-// ── Dashboard Token Operations ─────────────────────────────────────────────
+// ── Helpers ────────────────────────────────────────────────────────────────
 
 function hashToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
 
-function createToken({ name, role = 'agent' }) {
-  // Generate random safe token: nexo_tkn_32charsHex
+// ── Ticket Operations ──────────────────────────────────────────────────────
+
+async function createTicket({ chat_id, telefono, nombre_analista, nombre_empresa, correo, situacion, prioridad }) {
+  const payload = {
+    chat_id,
+    telefono: telefono || null,
+    nombre_analista: nombre_analista || null,
+    nombre_empresa: nombre_empresa || null,
+    correo: correo || null,
+    situacion: situacion || null,
+    prioridad: prioridad || null,
+    status: 'open'
+  };
+
+  const { data, error } = await supabase
+    .from('tickets')
+    .insert(payload)
+    .select()
+    .single();
+
+  if (error) {
+    console.error('❌ Error Supabase al crear ticket:', error.message);
+    throw error;
+  }
+  return data;
+}
+
+async function updateTicketSalesforce(id, { sf_case_id, sf_case_number }) {
+  const { error } = await supabase
+    .from('tickets')
+    .update({ sf_case_id, sf_case_number })
+    .eq('id', id);
+
+  if (error) console.error('❌ Error Supabase al actualizar Salesforce Case:', error.message);
+}
+
+async function closeTicket(id) {
+  const { error } = await supabase
+    .from('tickets')
+    .update({ status: 'closed', closed_at: new Date().toISOString() })
+    .eq('id', id);
+
+  if (error) console.error('❌ Error Supabase al cerrar ticket:', error.message);
+}
+
+async function getTickets() {
+  const { data, error } = await supabase
+    .from('tickets')
+    .select('*')
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    console.error('❌ Error Supabase al listar tickets:', error.message);
+    return [];
+  }
+  return data || [];
+}
+
+async function getTicketById(id) {
+  const { data, error } = await supabase
+    .from('tickets')
+    .select('*')
+    .eq('id', id)
+    .single();
+
+  if (error) {
+    console.error(`❌ Error Supabase al buscar ticket #${id}:`, error.message);
+    return null;
+  }
+  return data;
+}
+
+async function deleteTicket(id) {
+  // Cascades must be configured on Supabase tables
+  const { error } = await supabase
+    .from('tickets')
+    .delete()
+    .eq('id', id);
+
+  if (error) console.error(`❌ Error Supabase al eliminar ticket #${id}:`, error.message);
+}
+
+// ── Message Operations ─────────────────────────────────────────────────────
+
+async function saveMessage({ ticket_id, chat_id, body, from_user, is_bot, wa_message_id }) {
+  const payload = {
+    ticket_id: ticket_id || null,
+    chat_id,
+    body: body || '',
+    from_user: !!from_user,
+    is_bot: !!is_bot,
+    wa_message_id: wa_message_id || null
+  };
+
+  const { data, error } = await supabase
+    .from('messages')
+    .insert(payload)
+    .select()
+    .single();
+
+  if (error) {
+    console.error('❌ Error Supabase al guardar mensaje:', error.message);
+    return null;
+  }
+  return data;
+}
+
+async function getMessages(ticketId) {
+  const { data, error } = await supabase
+    .from('messages')
+    .select('*')
+    .eq('ticket_id', ticketId)
+    .order('timestamp', { ascending: true });
+
+  if (error) {
+    console.error('❌ Error Supabase al obtener mensajes:', error.message);
+    return [];
+  }
+  return data || [];
+}
+
+// ── Session Operations ─────────────────────────────────────────────────────
+
+async function getSession(chatId) {
+  const { data, error } = await supabase
+    .from('bot_sessions')
+    .select('*')
+    .eq('chat_id', chatId)
+    .single();
+
+  if (error || !data) return null;
+  return {
+    paso: data.paso,
+    nombre: data.nombre,
+    empresa: data.empresa,
+    correo: data.correo,
+    situacion: data.situacion,
+    ticketId: data.ticket_id
+  };
+}
+
+async function saveSession(chatId, session) {
+  const payload = {
+    chat_id: chatId,
+    paso: session.paso ?? null,
+    nombre: session.nombre ?? null,
+    empresa: session.empresa ?? null,
+    correo: session.correo ?? null,
+    situacion: session.situacion ?? null,
+    ticket_id: session.ticketId ?? null,
+    updated_at: new Date().toISOString()
+  };
+
+  const { error } = await supabase
+    .from('bot_sessions')
+    .upsert(payload, { onConflict: 'chat_id' });
+
+  if (error) console.error('❌ Error Supabase al guardar sesión:', error.message);
+}
+
+async function deleteSession(chatId) {
+  const { error } = await supabase
+    .from('bot_sessions')
+    .delete()
+    .eq('chat_id', chatId);
+
+  if (error) console.error('❌ Error Supabase al eliminar sesión:', error.message);
+}
+
+async function loadAllSessions() {
+  const { data, error } = await supabase
+    .from('bot_sessions')
+    .select('*');
+
+  if (error) {
+    console.error('❌ Error Supabase al cargar sesiones:', error.message);
+    return [];
+  }
+  return data || [];
+}
+
+// ── Stats ──────────────────────────────────────────────────────────────────
+
+async function getStats() {
+  // Safe estimation queries
+  const { count: total } = await supabase.from('tickets').select('*', { count: 'exact', head: true });
+  const { count: open }  = await supabase.from('tickets').select('*', { count: 'exact', head: true }).eq('status', 'open');
+  const { count: closed } = await supabase.from('tickets').select('*', { count: 'exact', head: true }).eq('status', 'closed');
+  
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+  const { count: today } = await supabase.from('tickets').select('*', { count: 'exact', head: true }).gte('created_at', todayStart.toISOString());
+
+  return { total: total || 0, open: open || 0, closed: closed || 0, today: today || 0 };
+}
+
+// ── Cleanup (TTL) ──────────────────────────────────────────────────────────
+
+async function cleanupOldMessages(ttlDays = 90) {
+  const limitDate = new Date();
+  limitDate.setDate(limitDate.getDate() - ttlDays);
+
+  const { data, error } = await supabase
+    .from('messages')
+    .delete()
+    .lt('timestamp', limitDate.toISOString());
+
+  if (error) console.error('❌ Error Supabase al limpiar mensajes viejos:', error.message);
+  else console.log(`🧹 Supabase: mensajes viejos eliminados (TTL: ${ttlDays}d)`);
+}
+
+async function cleanupOldSessions(ttlDays = 7) {
+  const limitDate = new Date();
+  limitDate.setDate(limitDate.getDate() - ttlDays);
+
+  const { data, error } = await supabase
+    .from('bot_sessions')
+    .delete()
+    .lt('updated_at', limitDate.toISOString());
+
+  if (error) console.error('❌ Error Supabase al limpiar sesiones viejas:', error.message);
+  else console.log(`🧹 Supabase: sesiones viejas eliminadas (TTL: ${ttlDays}d)`);
+}
+
+// ── Dashboard Token Operations ─────────────────────────────────────────────
+
+async function createToken({ name, role = 'agent' }) {
   const rawToken = 'nexo_tkn_' + crypto.randomBytes(16).toString('hex');
   const tokenHash = hashToken(rawToken);
 
-  run(
-    `INSERT INTO dashboard_tokens (token_hash, name, role, active)
-     VALUES (?, ?, ?, 1)`,
-    [tokenHash, name, role]
-  );
+  const { error } = await supabase
+    .from('dashboard_tokens')
+    .insert({ token_hash: tokenHash, name, role, active: true });
+
+  if (error) {
+    console.error('❌ Error Supabase al guardar token:', error.message);
+    throw error;
+  }
 
   return { rawToken, name, role };
 }
 
-function validateToken(token) {
+async function validateToken(token) {
   if (!token) return null;
   const tokenHash = hashToken(token);
-  const row = queryOne(
-    `SELECT id, name, role, active FROM dashboard_tokens WHERE token_hash = ?`,
-    [tokenHash]
-  );
-  if (!row || row.active !== 1) return null;
-  return { id: row.id, name: row.name, role: row.role };
+  const { data, error } = await supabase
+    .from('dashboard_tokens')
+    .select('id, name, role, active')
+    .eq('token_hash', tokenHash)
+    .single();
+
+  if (error || !data || !data.active) return null;
+  return { id: data.id, name: data.name, role: data.role };
 }
 
-function getTokens() {
-  return query(`SELECT id, name, role, active, created_at FROM dashboard_tokens ORDER BY created_at DESC`);
+async function getTokens() {
+  const { data, error } = await supabase
+    .from('dashboard_tokens')
+    .select('id, name, role, active, created_at')
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    console.error('❌ Error Supabase al obtener tokens:', error.message);
+    return [];
+  }
+  return data || [];
 }
 
-function revokeToken(id) {
-  run(`UPDATE dashboard_tokens SET active = 0 WHERE id = ?`, [id]);
+async function revokeToken(id) {
+  const { error } = await supabase
+    .from('dashboard_tokens')
+    .update({ active: false })
+    .eq('id', id);
+
+  if (error) console.error('❌ Error Supabase al revocar token:', error.message);
 }
+
+// Mock closing for Supabase (no active connections/intervals to clear like SQLite)
+function initDb() { return Promise.resolve(true); }
+function persistDb() { return Promise.resolve(true); }
+function closeDb() { return Promise.resolve(true); }
 
 module.exports = {
   initDb,
   persistDb,
+  closeDb,
   // Tickets
   createTicket,
   updateTicketSalesforce,

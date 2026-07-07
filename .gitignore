@@ -52,3 +52,5 @@ frontend/.env
 Thumbs.db
 ehthumbs.db
 Desktop.ini
+# Local Pi runtime state
+.atl/
