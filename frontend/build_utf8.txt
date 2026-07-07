@@ -1,0 +1,173 @@
+﻿
+> frontend@0.0.0 build
+> vite build
+
+[36mvite v8.0.1 [32mbuilding client environment for production...[36m[39m
+[2K
+transforming...Ô£ô 16 modules transformed.
+node.exe : [31mÔ£ù[39m Build 
+failed in 291ms
+En línea: 1 Carácter: 1
++ & "C:\Program 
+Files\nodejs/node.exe" 
+"C:\Program Files\nodejs/node_mo 
+...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~
+    + CategoryInfo          : Not 
+   Specified: ([31mÔ£ù[39m Bui  
+  ld failed in 291ms:String) []   
+ , RemoteException
+    + FullyQualifiedErrorId : Nat 
+   iveCommandError
+ 
+[31merror during build:
+[31mBuild failed with 2 errors:
+
+[31m[PARSE_ERROR] Error:[0m 
+Identifier `EmojiPicker` has 
+already been declared
+     [38;5;246mÔò¡[0m[38;5;246m
+ÔöÇ[0m[38;5;246m[[0m 
+src/App.jsx:5:8 [38;5;246m][0m
+     [38;5;246mÔöé[0m
+ [38;5;246m  5 Ôöé[0m [38;5;249
+mi[0m[38;5;249mm[0m[38;5;249mp
+[0m[38;5;249mo[0m[38;5;249mr[
+0m[38;5;249mt[0m[38;5;249m 
+[0mEmojiPicker[38;5;249m [0m[3
+8;5;249mf[0m[38;5;249mr[0m[38;
+5;249mo[0m[38;5;249mm[0m[38;5;
+249m [0m[38;5;249m"[0m[38;5;24
+9me[0m[38;5;249mm[0m[38;5;249m
+o[0m[38;5;249mj[0m[38;5;249mi
+[0m[38;5;249m-[0m[38;5;249mp[0
+m[38;5;249mi[0m[38;5;249mc[0m
+[38;5;249mk[0m[38;5;249me[0m[3
+8;5;249mr[0m[38;5;249m-[0m[38;
+5;249mr[0m[38;5;249me[0m[38;5;
+249ma[0m[38;5;249mc[0m[38;5;24
+9mt[0m[38;5;249m"[0m[38;5;249m
+;[0m
+ [38;5;240m    Ôöé[0m        
+ÔöÇÔöÇÔöÇÔöÇÔöÇÔö¼ÔöÇÔöÇÔöÇÔöÇÔöÇ 
+ 
+ [38;5;240m    Ôöé[0m           
+  Ôò░ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ 
+`EmojiPicker` has already been 
+declared here
+ [38;5;240m    Ôöé[0m 
+ [38;5;246m306 Ôöé[0m [38;5;249
+mf[0m[38;5;249mu[0m[38;5;249mn
+[0m[38;5;249mc[0m[38;5;249mt[
+0m[38;5;249mi[0m[38;5;249mo[0m
+[38;5;249mn[0m[38;5;249m [0mEm
+ojiPicker[38;5;249m([0m[38;5;24
+9m{[0m[38;5;249m [0m[38;5;249m
+o[0m[38;5;249mn[0m[38;5;249mS
+[0m[38;5;249me[0m[38;5;249ml[0
+m[38;5;249me[0m[38;5;249mc[0m
+[38;5;249mt[0m[38;5;249m [0m[3
+8;5;249m}[0m[38;5;249m)[0m[38;
+5;249m [0m[38;5;249m{[0m
+ [38;5;240m    Ôöé[0m          
+ÔöÇÔöÇÔöÇÔöÇÔöÇÔö¼ÔöÇÔöÇÔöÇÔöÇÔöÇ 
+ 
+ [38;5;240m    Ôöé[0m           
+    Ôò░ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ It 
+can not be redeclared here
+[38;5;246mÔöÇÔöÇÔöÇÔöÇÔöÇÔò»[0m
+
+[31m[PARSE_ERROR] Error:[0m 
+Identifier `EmojiPicker` has 
+already been declared
+     [38;5;246mÔò¡[0m[38;5;246m
+ÔöÇ[0m[38;5;246m[[0m 
+src/App.jsx:5:8 [38;5;246m][0m
+     [38;5;246mÔöé[0m
+ [38;5;246m  5 Ôöé[0m [38;5;249
+mi[0m[38;5;249mm[0m[38;5;249mp
+[0m[38;5;249mo[0m[38;5;249mr[
+0m[38;5;249mt[0m[38;5;249m 
+[0mEmojiPicker[38;5;249m [0m[3
+8;5;249mf[0m[38;5;249mr[0m[38;
+5;249mo[0m[38;5;249mm[0m[38;5;
+249m [0m[38;5;249m"[0m[38;5;24
+9me[0m[38;5;249mm[0m[38;5;249m
+o[0m[38;5;249mj[0m[38;5;249mi
+[0m[38;5;249m-[0m[38;5;249mp[0
+m[38;5;249mi[0m[38;5;249mc[0m
+[38;5;249mk[0m[38;5;249me[0m[3
+8;5;249mr[0m[38;5;249m-[0m[38;
+5;249mr[0m[38;5;249me[0m[38;5;
+249ma[0m[38;5;249mc[0m[38;5;24
+9mt[0m[38;5;249m"[0m[38;5;249m
+;[0m
+ [38;5;240m    Ôöé[0m        
+ÔöÇÔöÇÔöÇÔöÇÔöÇÔö¼ÔöÇÔöÇÔöÇÔöÇÔöÇ 
+ 
+ [38;5;240m    Ôöé[0m           
+  Ôò░ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ 
+`EmojiPicker` has already been 
+declared here
+ [38;5;240m    Ôöé[0m 
+ [38;5;246m306 Ôöé[0m [38;5;249
+mf[0m[38;5;249mu[0m[38;5;249mn
+[0m[38;5;249mc[0m[38;5;249mt[
+0m[38;5;249mi[0m[38;5;249mo[0m
+[38;5;249mn[0m[38;5;249m [0mEm
+ojiPicker[38;5;249m([0m[38;5;24
+9m{[0m[38;5;249m [0m[38;5;249m
+o[0m[38;5;249mn[0m[38;5;249mS
+[0m[38;5;249me[0m[38;5;249ml[0
+m[38;5;249me[0m[38;5;249mc[0m
+[38;5;249mt[0m[38;5;249m [0m[3
+8;5;249m}[0m[38;5;249m)[0m[38;
+5;249m [0m[38;5;249m{[0m
+ [38;5;240m    Ôöé[0m          
+ÔöÇÔöÇÔöÇÔöÇÔöÇÔö¼ÔöÇÔöÇÔöÇÔöÇÔöÇ 
+ 
+ [38;5;240m    Ôöé[0m           
+    Ôò░ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ It 
+can not be redeclared here
+[38;5;246mÔöÇÔöÇÔöÇÔöÇÔöÇÔò»[0m
+[31m
+    at 
+aggregateBindingErrorsIntoJsError 
+(file:///C:/Users/William%20Zapata
+/Desktop/PROYECTOS/NEXO/frontend/n
+ode_modules/rolldown/dist/shared/e
+rror-BO4SlZV_.mjs:48:18)
+    at unwrapBindingResult (file:/
+//C:/Users/William%20Zapata/Deskto
+p/PROYECTOS/NEXO/frontend/node_mod
+ules/rolldown/dist/shared/error-BO
+4SlZV_.mjs:18:128)
+    at #build (file:///C:/Users/Wi
+lliam%20Zapata/Desktop/PROYECTOS/N
+EXO/frontend/node_modules/rolldown
+/dist/shared/rolldown-build-yQC7KN
+8K.mjs:3311:34)
+    at async buildEnvironment (fil
+e:///C:/Users/William%20Zapata/Des
+ktop/PROYECTOS/NEXO/frontend/node_
+modules/vite/dist/node/chunks/node
+.js:32817:64)
+    at async Object.build (file://
+/C:/Users/William%20Zapata/Desktop
+/PROYECTOS/NEXO/frontend/node_modu
+les/vite/dist/node/chunks/node.js:
+33239:19)
+    at async Object.buildApp (file
+:///C:/Users/William%20Zapata/Desk
+top/PROYECTOS/NEXO/frontend/node_m
+odules/vite/dist/node/chunks/node.
+js:33236:153)
+    at async CAC.<anonymous> (file
+:///C:/Users/William%20Zapata/Desk
+top/PROYECTOS/NEXO/frontend/node_m
+odules/vite/dist/node/cli.js:778:3
+) {
+  errors: [Getter/Setter]
+}[39m

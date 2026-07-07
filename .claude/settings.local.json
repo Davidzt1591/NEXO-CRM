@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cmd //c \"netstat -ano | findstr :3001 | findstr LISTENING\")",
+      "Bash(cmd //c \"taskkill /PID 22240 /F\")",
+      "Bash(node server.js)",
+      "Bash(cmd //c \"taskkill /PID 4800 /F\")",
+      "Bash(cmd //c \"taskkill /PID 25180 /F\")",
+      "Bash(cmd //c \"taskkill /PID 28920 /F\")",
+      "Bash(cmd //c \"netstat -ano | findstr :3001\")",
+      "Bash(cmd //c \"taskkill /PID 9532 /F\")",
+      "Bash(cmd //c \"taskkill /PID 27480 /F\")",
+      "Bash(cmd //c \"type \"\"c:\\\\Users\\\\William Zapata\\\\Desktop\\\\PROYECTOS\\\\NEXO\\\\backend\\\\package.json\"\"\")"
+    ]
+  }
+}
