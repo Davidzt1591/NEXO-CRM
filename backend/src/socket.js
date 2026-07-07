@@ -140,21 +140,40 @@ function setupSockets(io, client, borrarSesion) {
       }
     });
 
+    // Socket Rate Limiting Map
+    const messageRateLimit = [];
+
     // Enviar mensaje manual desde dashboard
     socket.on('send-message', async ({ chatId, message, ticketId, media }) => {
+      // ── Rate Limiting Check (Max 5 messages per 2 seconds) ─────────
+      const now = Date.now();
+      // Filter out timestamps older than 2 seconds
+      const recentAttempts = messageRateLimit.filter(t => now - t < 2000);
+      if (recentAttempts.length >= 5) {
+        return socket.emit('send-error', { message: 'Límite de velocidad excedido. Intenta de nuevo en unos segundos.' });
+      }
+      recentAttempts.push(now);
+      // Clean array reference
+      messageRateLimit.length = 0;
+      messageRateLimit.push(...recentAttempts);
+
+      // ── XSS Sanitization ──────────────────────────────────────────
+      const xss = require('xss');
+      const safeMessage = message ? xss(message) : '';
+
       try {
         let sent;
         if (media?.data) {
-          sent = await whatsappAdapter.sendMessage(chatId, message, { media });
+          sent = await whatsappAdapter.sendMessage(chatId, safeMessage, { media });
         } else {
-          sent = await whatsappAdapter.sendMessage(chatId, message);
+          sent = await whatsappAdapter.sendMessage(chatId, safeMessage);
         }
 
         const waMessageId = sent?.id?._serialized || null;
-        const displayBody = message || `[${media?.mimetype?.split('/')[0] || 'media'}]`;
+        const displayBody = safeMessage || `[${media?.mimetype?.split('/')[0] || 'media'}]`;
         const timestamp   = new Date().toISOString();
         const saved       = ticketId
-          ? db.saveMessage({ ticket_id: ticketId, chat_id: chatId, body: displayBody, from_user: false, is_bot: false, wa_message_id: waMessageId })
+          ? await db.saveMessage({ ticket_id: ticketId, chat_id: chatId, body: displayBody, from_user: false, is_bot: false, wa_message_id: waMessageId })
           : null;
 
         io.emit('new-message', {

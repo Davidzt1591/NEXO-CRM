@@ -34,15 +34,19 @@ const limiter = rateLimit({
   max: 100,
   message: { error: 'Demasiadas peticiones desde esta IP, por favor intenta más tarde.' }
 });
+
+app.use(express.json());
 app.use('/', limiter);
+
+// Public Endpoints
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', uptime: process.uptime() });
+});
 
 const { validateToken } = require('./src/database/db');
 
 // Auth middleware for API routes
 const apiAuth = async (req, res, next) => {
-  // Exclude healthcheck from authorization
-  if (req.path === '/health') return next();
-
   let token = req.headers['authorization'];
   if (token && token.startsWith('Bearer ')) {
     token = token.slice(7);
@@ -67,7 +71,15 @@ const apiAuth = async (req, res, next) => {
   }
 };
 
+// Enforce auth on all API sub-routes
 app.use('/api', apiAuth);
+
+// Protected API Routes
+app.use('/api/sf', require('./src/routes/salesforce'));
+
+app.get('/api/logs', (req, res) => {
+  res.json(globalLogs);
+});
 
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -79,20 +91,7 @@ const io = new Server(server, {
   },
 });
 
-app.use(express.json());
-
 const PORT = process.env.PORT || 3001;
-
-// Salesforce proxy routes
-app.use('/api/sf', require('./src/routes/salesforce'));
-
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', uptime: process.uptime() });
-});
-
-app.get('/api/logs', (req, res) => {
-  res.json(globalLogs);
-});
 
 const { initDb }           = require('./src/database/db');
 const { startCleanupCron } = require('./src/database/cleanup');
