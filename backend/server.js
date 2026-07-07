@@ -23,6 +23,7 @@ const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 
 const app = express();
+app.set('trust proxy', 1); // Trust first proxy (Nginx) for client IP detection
 
 app.use(helmet());
 app.use(cors({

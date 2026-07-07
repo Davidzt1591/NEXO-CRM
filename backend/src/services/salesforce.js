@@ -25,44 +25,91 @@ let describeCache = {
 
 // ── Token Management ──────────────────────────────────────────────────────────
 
+const jwt = require('jsonwebtoken');
+const fs = require('fs');
+const path = require('path');
+
 async function getToken(force = false) {
   if (!force && tokenCache.accessToken && Date.now() < tokenCache.expiresAt) {
     return tokenCache.accessToken;
   }
 
-  if (!CLIENT_ID || !CLIENT_SECRET) {
-    throw new Error('Salesforce no configurado. Agrega SALESFORCE_CLIENT_ID y SALESFORCE_CLIENT_SECRET al archivo .env');
+  if (!CLIENT_ID) {
+    throw new Error('Salesforce no configurado. Agrega SALESFORCE_CLIENT_ID al archivo .env');
   }
 
-  const params = new URLSearchParams({
-    grant_type    : 'client_credentials',
-    client_id     : CLIENT_ID,
-    client_secret : CLIENT_SECRET,
-  });
+  const keyPath = path.resolve(__dirname, '..', '..', 'certs', 'salesforce.key');
+  let accessToken = null;
 
-  const res = await fetch(`${SF_LOGIN_URL}/services/oauth2/token`, {
-    method  : 'POST',
-    headers : { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body    : params.toString(),
-  });
+  // 1. Try JWT Bearer flow if private key exists (Ciberseguridad Production standard)
+  if (fs.existsSync(keyPath)) {
+    console.log('🛡️  Certificado detectado. Iniciando autenticación JWT con Salesforce...');
+    const privateKey = fs.readFileSync(keyPath, 'utf8');
+    const username = process.env.SALESFORCE_USERNAME || 'soporte.mgt@magnetoglobal.com';
 
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`SF Auth Error (${res.status}): ${err}`);
+    const jwtPayload = {
+      iss: CLIENT_ID,
+      sub: username,
+      aud: SF_LOGIN_URL,
+      exp: Math.floor(Date.now() / 1000) + (5 * 60) // 5 minutes max expiration
+    };
+
+    // Sign the JWT assertion locally
+    const assertion = jwt.sign(jwtPayload, privateKey, { algorithm: 'RS256' });
+
+    const params = new URLSearchParams({
+      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+      assertion: assertion
+    });
+
+    const res = await fetch(`${SF_LOGIN_URL}/services/oauth2/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: params.toString()
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      accessToken = data.access_token;
+      console.log('🔑 JWT Bearer token obtenido de Salesforce exitosamente.');
+    } else {
+      const err = await res.text();
+      console.warn(`⚠️  Falló autenticación JWT (${res.status}): ${err}. Reintentando con credenciales básicas...`);
+    }
   }
 
-  const data = await res.json();
-  tokenCache.accessToken = data.access_token;
+  // 2. Fallback to client_credentials if no cert or JWT failed
+  if (!accessToken) {
+    if (!CLIENT_SECRET) {
+      throw new Error('Salesforce no configurado. Falta SALESFORCE_CLIENT_SECRET para fallback.');
+    }
+    console.log('🔑 Iniciando autenticación por credenciales básicas...');
+    const params = new URLSearchParams({
+      grant_type    : 'client_credentials',
+      client_id     : CLIENT_ID,
+      client_secret : CLIENT_SECRET,
+    });
+
+    const res = await fetch(`${SF_LOGIN_URL}/services/oauth2/token`, {
+      method  : 'POST',
+      headers : { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body    : params.toString(),
+    });
+
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`SF Auth Error (${res.status}): ${err}`);
+    }
+
+    const data = await res.json();
+    accessToken = data.access_token;
+  }
+
+  tokenCache.accessToken = accessToken;
   tokenCache.expiresAt   = Date.now() + (55 * 60 * 1000); // 55 min (buffer)
-  tokenCache.idUrl       = data.id;
-  tokenCache.ownerInfo   = null; // Reset so it gets re-fetched
+  tokenCache.ownerInfo   = null;
 
-  console.log('🔑 Salesforce token obtenido correctamente.');
-
-  // Immediately fetch owner identity
-  await _fetchOwnerInfo(data.access_token, data.id);
-
-  return data.access_token;
+  return accessToken;
 }
 
 async function _fetchOwnerInfo(token, idUrl) {
