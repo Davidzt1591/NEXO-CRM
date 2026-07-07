@@ -3,8 +3,22 @@ const db    = require('./database/db');
 const whatsappAdapter = require('./services/whatsapp');
 
 function setupSockets(io, client, borrarSesion) {
+  // Authentication middleware for Sockets
+  io.use((socket, next) => {
+    const token = socket.handshake.auth?.token || socket.handshake.query?.token;
+    if (!token) {
+      return next(new Error('Acceso no autorizado: Token ausente.'));
+    }
+    const user = db.validateToken(token);
+    if (!user) {
+      return next(new Error('Acceso no autorizado: Token inválido o revocado.'));
+    }
+    socket.user = user;
+    next();
+  });
+
   io.on('connection', (socket) => {
-    console.log('🖥️  Dashboard conectado:', socket.id);
+    console.log(`🖥️  Dashboard conectado: ${socket.id} (Usuario: ${socket.user.name}, Rol: ${socket.user.role})`);
 
     // Enviar estado actual del bot al nuevo cliente
     socket.emit('bot-activo', store.botActivo);

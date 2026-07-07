@@ -7,6 +7,7 @@
 const initSqlJs = require('sql.js');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 
 const DB_PATH = path.resolve(__dirname, '..', '..', 'data', 'nexo.db');
 const DB_DIR  = path.dirname(DB_PATH);
@@ -62,6 +63,15 @@ const SCHEMA = `
     situacion  TEXT,
     ticket_id  INTEGER,
     updated_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS dashboard_tokens (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_hash  TEXT    NOT NULL UNIQUE,
+    name        TEXT    NOT NULL,
+    role        TEXT    DEFAULT 'agent',
+    active      INTEGER DEFAULT 1,
+    created_at  TEXT    DEFAULT (datetime('now'))
   );
 
   CREATE INDEX IF NOT EXISTS idx_messages_ticket    ON messages (ticket_id);
@@ -261,6 +271,45 @@ function cleanupOldSessions(ttlDays = 7) {
   console.log(`🧹 Cleanup: sesiones inactivas eliminadas con más de ${ttlDays} días`);
 }
 
+// ── Dashboard Token Operations ─────────────────────────────────────────────
+
+function hashToken(token) {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+function createToken({ name, role = 'agent' }) {
+  // Generate random safe token: nexo_tkn_32charsHex
+  const rawToken = 'nexo_tkn_' + crypto.randomBytes(16).toString('hex');
+  const tokenHash = hashToken(rawToken);
+
+  run(
+    `INSERT INTO dashboard_tokens (token_hash, name, role, active)
+     VALUES (?, ?, ?, 1)`,
+    [tokenHash, name, role]
+  );
+
+  return { rawToken, name, role };
+}
+
+function validateToken(token) {
+  if (!token) return null;
+  const tokenHash = hashToken(token);
+  const row = queryOne(
+    `SELECT id, name, role, active FROM dashboard_tokens WHERE token_hash = ?`,
+    [tokenHash]
+  );
+  if (!row || row.active !== 1) return null;
+  return { id: row.id, name: row.name, role: row.role };
+}
+
+function getTokens() {
+  return query(`SELECT id, name, role, active, created_at FROM dashboard_tokens ORDER BY created_at DESC`);
+}
+
+function revokeToken(id) {
+  run(`UPDATE dashboard_tokens SET active = 0 WHERE id = ?`, [id]);
+}
+
 module.exports = {
   initDb,
   persistDb,
@@ -284,4 +333,9 @@ module.exports = {
   // Cleanup
   cleanupOldMessages,
   cleanupOldSessions,
+  // Dashboard Tokens
+  createToken,
+  validateToken,
+  getTokens,
+  revokeToken
 };
