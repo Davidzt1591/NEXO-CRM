@@ -15,7 +15,7 @@ function addLog(type, args) {
 console.log = (...args) => { addLog('INFO', args); origLog(...args); };
 console.error = (...args) => { addLog('ERROR', args); origError(...args); };
 console.warn = (...args) => { addLog('WARN', args); origWarn(...args); };
-const { setupWhatsApp } = require('./src/services/whatsapp');
+const { initWhatsApp: setupWhatsApp } = require('./src/services/whatsapp');
 const { setupSockets } = require('./src/socket');
 
 const helmet = require('helmet');

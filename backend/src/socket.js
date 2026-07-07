@@ -1,6 +1,6 @@
-const { MessageMedia } = require('whatsapp-web.js');
 const store = require('./store');
 const db    = require('./database/db');
+const whatsappAdapter = require('./services/whatsapp');
 
 function setupSockets(io, client, borrarSesion) {
   io.on('connection', (socket) => {
@@ -10,7 +10,7 @@ function setupSockets(io, client, borrarSesion) {
     socket.emit('bot-activo', store.botActivo);
 
     // Enviar el estado de autenticación real de WhatsApp
-    if (client.info) {
+    if (whatsappAdapter.isReady()) {
       socket.emit('bot-status', { status: 'ready' });
     } else if (store.lastQR) {
       const elapsed   = Math.floor((Date.now() - store.lastQRTime) / 1000);
@@ -23,16 +23,8 @@ function setupSockets(io, client, borrarSesion) {
 
     // Diagnósticos del sistema para el Dashboard
     socket.on('get-system-info', () => {
-      if (client?.info) {
-        socket.emit('system-info', {
-          user: client.info.wid?.user || 'Desconocido',
-          pushname: client.info.pushname || 'Cuenta Empresa',
-          platform: client.info.platform || 'N/A',
-          connectedAt: store.horaDeInicio ? store.horaDeInicio * 1000 : null
-        });
-      } else {
-        socket.emit('system-info', null);
-      }
+      const info = whatsappAdapter.getSystemInfo();
+      socket.emit('system-info', info);
     });
 
     // Solicitud manual de QR desde el dashboard
@@ -136,10 +128,9 @@ function setupSockets(io, client, borrarSesion) {
       try {
         let sent;
         if (media?.data) {
-          const m = new MessageMedia(media.mimetype, media.data, media.filename || 'archivo');
-          sent    = await client.sendMessage(chatId, m, message ? { caption: message } : {});
+          sent = await whatsappAdapter.sendMessage(chatId, message, { media });
         } else {
-          sent = await client.sendMessage(chatId, message);
+          sent = await whatsappAdapter.sendMessage(chatId, message);
         }
 
         const waMessageId = sent?.id?._serialized || null;

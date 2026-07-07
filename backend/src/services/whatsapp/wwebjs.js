@@ -2,10 +2,10 @@ const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const fs     = require('fs');
 const path   = require('path');
-const store  = require('../store');
-const db     = require('../database/db');
-const { analizarPrioridad } = require('./ai');
-const { crearCase }         = require('./salesforce');
+const store  = require('../../store');
+const db     = require('../../database/db');
+const { analizarPrioridad } = require('../ai');
+const { crearCase }         = require('../salesforce');
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
