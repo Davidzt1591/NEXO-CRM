@@ -13,7 +13,10 @@ import SalesforceCaseModal from './components/SalesforceCaseModal';
 
 const socket = io('http://localhost:3001', {
   transports: ['websocket'],
-  autoConnect: true,
+  autoConnect: false, // Let the app connect explicitly after token check
+  auth: (cb) => {
+    cb({ token: localStorage.getItem('nexo_token') });
+  },
   reconnectionAttempts: 10,
   reconnectionDelay: 1500,
 });
@@ -431,10 +434,43 @@ export default function App() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [selectedMessages.length]);
 
-  // Socket setup — runs once on mount
+  const [tokenInput, setTokenInput] = useState('');
+  const [authError, setAuthError] = useState(null);
+  const [isAuthenticated, setIsAuthenticated] = useState(!!localStorage.getItem('nexo_token'));
+
+  const handleLogout = () => {
+    localStorage.removeItem('nexo_token');
+    setIsAuthenticated(false);
+    setSystemInfo(null);
+    socket.disconnect();
+  };
+
+  const handleLogin = (e) => {
+    e.preventDefault();
+    if (!tokenInput.trim()) return;
+    localStorage.setItem('nexo_token', tokenInput.trim());
+    setAuthError(null);
+    setIsAuthenticated(true);
+  };
+
+  // Socket setup — runs when authenticated
   useEffect(() => {
+    if (!isAuthenticated) {
+      socket.disconnect();
+      return;
+    }
+
+    socket.connect();
+
     socket.on('connect',    () => setBotStatus('connected'));
     socket.on('disconnect', () => setBotStatus('disconnected'));
+    
+    socket.on('connect_error', (err) => {
+      console.error('Socket connection error:', err.message);
+      setAuthError('Acceso denegado: Token inválido o revocado.');
+      handleLogout();
+    });
+
     socket.on('bot-status', ({ status }) => {
       setBotStatus(status);
       if (status === 'ready') {
@@ -634,7 +670,7 @@ export default function App() {
       socket.removeAllListeners();
       clearInterval(qrTimerRef.current);
     };
-  }, []);
+  }, [isAuthenticated]);
 
   const selectContact = useCallback((contactKey) => {
     setSelectedId(contactKey);
@@ -847,6 +883,42 @@ export default function App() {
   const isManual   = chatModes[selectedChatId] === 'manual';
   const isSilenced = silenced[selectedChatId];
 
+  if (!isAuthenticated) {
+    return (
+      <div className="login-container">
+        <div className="login-card">
+          <div className="login-logo">N</div>
+          <h1 className="login-title">NEXO</h1>
+          <p className="login-subtitle">Dashboard de Integraciones</p>
+          
+          <form onSubmit={handleLogin} className="login-form">
+            <div className="login-input-group">
+              <label className="login-label">Token de Acceso Corporativo</label>
+              <input
+                type="password"
+                className="login-input"
+                placeholder="Introduce tu token nexo_tkn_..."
+                value={tokenInput}
+                onChange={(e) => setTokenInput(e.target.value)}
+                required
+              />
+            </div>
+            
+            {authError && <div className="login-error-msg">{authError}</div>}
+            
+            <button type="submit" className="login-submit-btn">
+              Verificar Credenciales
+            </button>
+          </form>
+          
+          <div className="login-footer">
+            Área protegida de Magneto365. Acceso auditado.
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="layout">
 
@@ -890,6 +962,14 @@ export default function App() {
             </button>
           )}
           <ConnectionDot status={botStatus} />
+          <button 
+            className="action-btn action-btn--secondary" 
+            onClick={handleLogout}
+            title="Cerrar sesión del Dashboard"
+            style={{ marginLeft: '8px', padding: '6px 12px', height: '36px' }}
+          >
+            Salir
+          </button>
         </div>
       </header>
 
