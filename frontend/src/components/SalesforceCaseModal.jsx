@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 
 const API = 'http://localhost:3001/api/sf';
 
@@ -55,6 +55,7 @@ function AccountLookup({ initialAccount, onSelect }) {
   // Fetch suggestions
   useEffect(() => {
     if (selected || debouncedQuery.length < 3) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setResults([]);
       setShowDropdown(false);
       return;

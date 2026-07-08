@@ -10,6 +10,8 @@ import {
 } from 'lucide-react';
 import './App.css';
 import SalesforceCaseModal from './components/SalesforceCaseModal';
+import AdminPanel from './components/AdminPanel';
+import { apiRequest } from './lib/apiClient';
 
 const socket = io('http://localhost:3001', {
   transports: ['websocket'],
@@ -738,8 +740,7 @@ export default function App() {
     setLogsLoading(true);
     setCurrentView('logs');
     try {
-      const res = await fetch('http://localhost:3001/api/logs');
-      const data = await res.json();
+      const data = await apiRequest('/api/logs');
       setLogs(data.reverse());
     } catch(e) {
       setLogs([{ ts: new Date().toISOString(), type: 'ERROR', msg: 'No se pudo conectar al API de logs: ' + e.message }]);
@@ -917,6 +918,10 @@ export default function App() {
         </div>
       </div>
     );
+  }
+
+  if (window.location.pathname === '/admin') {
+    return <AdminPanel socket={socket} onLogout={handleLogout} />;
   }
 
   return (

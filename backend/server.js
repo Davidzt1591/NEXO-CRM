@@ -8,7 +8,10 @@ const origLog = console.log;
 const origError = console.error;
 const origWarn = console.warn;
 function addLog(type, args) {
-  const msg = Array.from(args).map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+  const msg = Array.from(args)
+    .map(a => typeof a === 'object' ? JSON.stringify(a) : String(a))
+    .join(' ')
+    .replace(/(pairing-code|pairing code|c[oó]digo de emparejamiento|qr)([^\n]{0,40})([A-Za-z0-9+/=_-]{6,})/gi, '$1$2[REDACTED]');
   globalLogs.push({ ts: new Date().toISOString(), type, msg });
   if (globalLogs.length > 200) globalLogs.shift(); // Max 200 logs
 }
@@ -45,6 +48,7 @@ app.get('/health', (req, res) => {
 });
 
 const { validateToken } = require('./src/database/db');
+const adminOnly = require('./src/middleware/adminOnly');
 
 // Auth middleware for API routes
 const apiAuth = async (req, res, next) => {
@@ -77,8 +81,9 @@ app.use('/api', apiAuth);
 
 // Protected API Routes
 app.use('/api/sf', require('./src/routes/salesforce'));
+app.use('/api/admin', adminOnly, require('./src/routes/admin'));
 
-app.get('/api/logs', (req, res) => {
+app.get('/api/logs', adminOnly, (req, res) => {
   res.json(globalLogs);
 });
 

@@ -1,6 +1,72 @@
 const store = require('./store');
 const db    = require('./database/db');
 const whatsappAdapter = require('./services/whatsapp');
+const { canAccessTicket, filterTicketsForPrincipal, isAdmin, emitOperational } = require('./realtime/operational');
+
+async function resolveTicketArea(ticketId) {
+  if (!ticketId) return null;
+  const ticket = await db.getTicketById(ticketId);
+  return ticket?.area_id || null;
+}
+
+async function resolveChatArea(chatId) {
+  const ticketId = store.sesiones[chatId]?.ticketId;
+  return resolveTicketArea(ticketId);
+}
+
+function emitAdminOperation(io, event, payload, areaId) {
+  let target = io.to('admin');
+  if (areaId) target = target.to(`area:${areaId}`);
+  target.emit(event, payload);
+}
+
+async function emitAdminChatOperation(io, event, payload, chatId) {
+  try {
+    emitAdminOperation(io, event, payload, await resolveChatArea(chatId));
+  } catch (err) {
+    console.warn(`⚠️  No se pudo resolver área para ${event}:`, err.message);
+    emitAdminOperation(io, event, payload, null);
+  }
+}
+
+async function getAuthorizedTicket(socket, ticketId) {
+  if (!ticketId) return null;
+
+  const ticket = await db.getTicketWithAssignment(ticketId);
+  if (!ticket) return null;
+  if (canAccessTicket(socket.user, socket.analyst, ticket)) return ticket;
+
+  return null;
+}
+
+async function requireAuthorizedTicket(socket, ticketId, errorEvent = 'auth-error') {
+  const ticket = await getAuthorizedTicket(socket, ticketId);
+  if (ticket) return ticket;
+
+  socket.emit(errorEvent, { message: 'You are not authorized to access this ticket.' });
+  return null;
+}
+
+function requireAdminSocket(socket, errorEvent = 'auth-error') {
+  if (isAdmin(socket.user)) return true;
+  socket.emit(errorEvent, { message: 'Administrator privileges are required.' });
+  return false;
+}
+
+function emitInitialWhatsAppAuthState(socket) {
+  if (!isAdmin(socket.user)) return;
+
+  if (whatsappAdapter.isReady()) {
+    socket.emit('bot-status', { status: 'ready' });
+  } else if (store.lastQR) {
+    const elapsed   = Math.floor((Date.now() - store.lastQRTime) / 1000);
+    const remaining = Math.max(1, 20 - elapsed);
+    socket.emit('qr', { qr: store.lastQR, expiresIn: remaining });
+    socket.emit('bot-status', { status: 'qr' });
+  } else {
+    socket.emit('bot-status', { status: 'disconnected' });
+  }
+}
 
 function setupSockets(io, client, borrarSesion) {
   io.use(async (socket, next) => {
@@ -20,44 +86,54 @@ function setupSockets(io, client, borrarSesion) {
     }
   });
 
-  io.on('connection', (socket) => {
+  io.on('connection', async (socket) => {
     console.log(`🖥️  Dashboard conectado: ${socket.id} (Usuario: ${socket.user.name}, Rol: ${socket.user.role})`);
+
+    let analyst = null;
+    if (socket.user.role === 'admin') {
+      socket.join('admin');
+    } else {
+      socket.join('unassigned:agents');
+    }
+
+    try {
+      analyst = await db.getAnalystByTokenId(socket.user.id);
+      if (analyst?.id) socket.join(`analyst:${analyst.id}`);
+      if (analyst?.area_id) socket.join(`area:${analyst.area_id}`);
+      socket.analyst = analyst;
+    } catch (err) {
+      console.warn('⚠️  No se pudo resolver sala de analista:', err.message);
+    }
 
     // Enviar estado actual del bot al nuevo cliente
     socket.emit('bot-activo', store.botActivo);
 
-    // Enviar el estado de autenticación real de WhatsApp
-    if (whatsappAdapter.isReady()) {
-      socket.emit('bot-status', { status: 'ready' });
-    } else if (store.lastQR) {
-      const elapsed   = Math.floor((Date.now() - store.lastQRTime) / 1000);
-      const remaining = Math.max(1, 20 - elapsed);
-      socket.emit('qr', { qr: store.lastQR, expiresIn: remaining });
-      socket.emit('bot-status', { status: 'qr' });
-    } else {
-      socket.emit('bot-status', { status: 'disconnected' });
-    }
+    // Enviar el estado de autenticación real de WhatsApp solo a administradores.
+    emitInitialWhatsAppAuthState(socket);
 
     // Diagnósticos del sistema para el Dashboard
     socket.on('get-system-info', () => {
+      if (!requireAdminSocket(socket)) return;
       const info = whatsappAdapter.getSystemInfo();
       socket.emit('system-info', info);
     });
 
     // Solicitud manual de QR desde el dashboard
     socket.on('request-qr', () => {
+      if (!requireAdminSocket(socket)) return;
       store.lastQRTime = 0;
       if (store.lastQR) socket.emit('qr', { qr: store.lastQR, expiresIn: 20 });
     });
 
     // Cerrar sesión y reconectar con otra cuenta
     socket.on('logout', async () => {
+      if (!requireAdminSocket(socket)) return;
       console.log('🔓 Cerrando sesión de WhatsApp...');
       store.lastQR              = null;
       store.lastQRTime          = 0;
       store.pendingPairingPhone = null;
-      io.emit('bot-status', { status: 'disconnected' });
-      io.emit('qr-cleared');
+      io.to('admin').emit('bot-status', { status: 'disconnected' });
+      io.to('admin').emit('qr-cleared');
 
       try {
         await client.destroy();
@@ -80,15 +156,15 @@ function setupSockets(io, client, borrarSesion) {
 
     // Código numérico
     socket.on('request-pairing-code', async ({ phone }) => {
+      if (!requireAdminSocket(socket, 'pairing-code-error')) return;
       try {
         const cleanPhone = phone.replace(/\+/g, '').trim();
-        console.log(`📱 Solicitando código de emparejamiento para: ${cleanPhone}`);
+        console.log('📱 Solicitando código de emparejamiento de WhatsApp');
         const code = await client.requestPairingCode(cleanPhone);
-        console.log(`🔑 Código generado: ${code}`);
+        console.log('🔑 Código de emparejamiento generado');
         socket.emit('pairing-code', { code });
       } catch (err) {
-        require('fs').writeFileSync('pairing_err.txt', err.stack);
-        console.error('❌ Error generando código de emparejamiento:', err);
+        console.error('❌ Error generando código de emparejamiento:', err.message);
         socket.emit('pairing-code-error', {
           message: 'No se pudo generar el código numérico. Por favor revisa el número e intenta de nuevo o usa el QR.'
         });
@@ -97,33 +173,39 @@ function setupSockets(io, client, borrarSesion) {
 
     // Interruptor global del bot
     socket.on('set-bot-activo', (valor) => {
+      if (!requireAdminSocket(socket)) return;
       store.botActivo = valor;
       console.log(`🤖 Bot ${store.botActivo ? 'ACTIVADO' : 'DESACTIVADO'} por el dashboard`);
       io.emit('bot-activo', store.botActivo);
     });
 
     // Cambiar modo auto/manual
-    socket.on('toggle-mode', ({ chatId, mode }) => {
+    socket.on('toggle-mode', async ({ chatId, mode }) => {
+      if (!requireAdminSocket(socket)) return;
       store.chatModes.set(chatId, mode);
-      io.emit('mode-changed', { chatId, mode });
+      await emitAdminChatOperation(io, 'mode-changed', { chatId, mode }, chatId);
       console.log(`🔄 Modo [${chatId}] → ${mode}`);
     });
 
     // Silenciar / activar
-    socket.on('silence-chat', (chatId) => {
+    socket.on('silence-chat', async (chatId) => {
+      if (!requireAdminSocket(socket)) return;
       store.silenciados.add(chatId);
-      io.emit('chat-silenced', { chatId });
+      await emitAdminChatOperation(io, 'chat-silenced', { chatId }, chatId);
     });
 
-    socket.on('unsilence-chat', (chatId) => {
+    socket.on('unsilence-chat', async (chatId) => {
+      if (!requireAdminSocket(socket)) return;
       store.silenciados.delete(chatId);
-      io.emit('chat-unsilenced', { chatId });
+      await emitAdminChatOperation(io, 'chat-unsilenced', { chatId }, chatId);
     });
 
     // Forzar activación del bot directo
     socket.on('force-bot', async (chatId) => {
+      if (!requireAdminSocket(socket)) return;
       console.log(`🚀 Forzando inicio del bot para: ${chatId}`);
       try {
+        const areaId = await resolveChatArea(chatId);
         store.sesiones[chatId] = { paso: 0 };
         const msgStr = '¡Hola! Bienvenido al canal de soporte de Integraciones de *Magneto365*.\n\n' +
         'Para brindarte una atención más rápida, por favor responde con el número de tu perfil:\n' +
@@ -134,7 +216,7 @@ function setupSockets(io, client, borrarSesion) {
         await client.sendMessage(chatId, msgStr);
         store.sesiones[chatId] = { paso: 'filtro_no' };
         store.chatModes.set(chatId, 'auto');
-        io.emit('mode-changed', { chatId, mode: 'auto' });
+        emitAdminOperation(io, 'mode-changed', { chatId, mode: 'auto' }, areaId);
       } catch (e) {
         console.error('❌ Error forzando bot:', e.message);
       }
@@ -162,6 +244,11 @@ function setupSockets(io, client, borrarSesion) {
       const safeMessage = message ? xss(message) : '';
 
       try {
+        const authorizedTicket = ticketId
+          ? await requireAuthorizedTicket(socket, ticketId, 'send-error')
+          : (requireAdminSocket(socket, 'send-error') ? null : false);
+        if (authorizedTicket === false || (ticketId && !authorizedTicket)) return;
+
         let sent;
         if (media?.data) {
           sent = await whatsappAdapter.sendMessage(chatId, safeMessage, { media });
@@ -176,7 +263,8 @@ function setupSockets(io, client, borrarSesion) {
           ? await db.saveMessage({ ticket_id: ticketId, chat_id: chatId, body: displayBody, from_user: false, is_bot: false, wa_message_id: waMessageId })
           : null;
 
-        io.emit('new-message', {
+        const areaId = authorizedTicket?.area_id || null;
+        emitOperational(io, 'new-message', {
           chatId,
           ticketId:    ticketId || null,
           message:     displayBody,
@@ -186,7 +274,7 @@ function setupSockets(io, client, borrarSesion) {
           is_bot:      false,
           timestamp,
           id:          saved?.id
-        });
+        }, areaId);
       } catch (err) {
         console.error('Error enviando mensaje manual:', err);
         socket.emit('send-error', { message: 'No se pudo enviar el mensaje.' });
@@ -195,10 +283,11 @@ function setupSockets(io, client, borrarSesion) {
 
     // Reaccionar a mensaje de WhatsApp
     socket.on('react-message', async ({ waMessageId, emoji }) => {
+      if (!requireAdminSocket(socket)) return;
       try {
         const msg = await client.getMessageById(waMessageId);
         await msg.react(emoji);
-        io.emit('message-reaction', { waMessageId, emoji });
+        emitAdminOperation(io, 'message-reaction', { waMessageId, emoji }, null);
       } catch (e) {
         console.error('Error enviando reacción:', e.message);
       }
@@ -206,19 +295,38 @@ function setupSockets(io, client, borrarSesion) {
 
     // Load tickets
     socket.on('get-tickets', async () => {
-      const tickets = await db.getTickets();
-      socket.emit('tickets-list', tickets);
+      try {
+        const tickets = await db.getTickets();
+        if (isAdmin(socket.user)) {
+          socket.emit('tickets-list', tickets);
+          return;
+        }
+
+        const assignments = await db.listTicketAssignments();
+        const assignmentsByTicketId = new Map(assignments.map(item => [String(item.ticket_id), item]));
+        const scopedTickets = tickets.map(ticket => ({
+          ...ticket,
+          assignment: assignmentsByTicketId.get(String(ticket.id)) || null,
+        }));
+        socket.emit('tickets-list', filterTicketsForPrincipal(scopedTickets, socket.user, socket.analyst));
+      } catch (err) {
+        console.error('Error cargando tickets:', err);
+        socket.emit('tickets-error', { message: 'No se pudieron cargar los tickets.' });
+      }
     });
 
     // Load messages for a ticket
     socket.on('get-messages', async (ticketId) => {
+      const ticket = await requireAuthorizedTicket(socket, ticketId);
+      if (!ticket) return;
       const messages = await db.getMessages(ticketId);
       socket.emit('messages-list', messages);
     });
 
     // Close ticket
     socket.on('close-ticket', async (ticketId) => {
-      const ticketData = await db.getTicketById(ticketId);
+      const ticketData = await requireAuthorizedTicket(socket, ticketId);
+      if (!ticketData) return;
       await db.closeTicket(ticketId);
 
       if (ticketData?.telefono) {
@@ -231,20 +339,20 @@ function setupSockets(io, client, borrarSesion) {
           await client.sendMessage(ticketData.telefono, despedida);
           const timestamp = new Date().toISOString();
           await db.saveMessage({ ticket_id: ticketId, chat_id: ticketData.telefono, body: despedida, from_user: false, is_bot: true });
-          io.emit('new-message', {
+          emitOperational(io, 'new-message', {
             chatId:    ticketData.telefono,
             ticketId,
             message:   despedida,
             from_user: false,
             is_bot:    true,
             timestamp,
-          });
+          }, ticketData?.area_id || null);
         } catch (e) {
           console.warn('⚠️  Error enviando mensaje de cierre:', e.message);
         }
       }
 
-      io.emit('ticket-closed', { ticketId });
+      emitOperational(io, 'ticket-closed', { ticketId }, ticketData?.area_id || null);
       Object.keys(store.sesiones).forEach(chatId => {
         if (store.sesiones[chatId]?.ticketId === ticketId) delete store.sesiones[chatId];
       });
@@ -253,14 +361,21 @@ function setupSockets(io, client, borrarSesion) {
     // Delete ticket and chat permanently
     socket.on('delete-chat', async ({ contactKey, ticketId }) => {
       console.log('🗑️ delete-chat recibido:', { contactKey, ticketId });
+      const ticket = ticketId
+        ? await requireAuthorizedTicket(socket, ticketId)
+        : (requireAdminSocket(socket) ? null : false);
+      if (ticket === false || (ticketId && !ticket)) return;
+      const areaId = ticket?.area_id || null;
       if (ticketId) {
         await db.deleteTicket(ticketId);
       }
-      io.emit('chat-deleted', { contactKey });
+      emitOperational(io, 'chat-deleted', { contactKey }, areaId);
     });
 
     // AI Copilot Endpoints
     socket.on('request-summary', async (ticketId) => {
+      const ticket = await requireAuthorizedTicket(socket, ticketId, 'summary-error');
+      if (!ticket) return;
       const messages = await db.getMessages(ticketId);
       if (!messages || messages.length === 0) {
         socket.emit('summary-error', { message: 'No hay mensajes para resumir' });
@@ -290,6 +405,13 @@ function setupSockets(io, client, borrarSesion) {
 
       let targetTicketId = ticketId;
 
+      if (targetTicketId) {
+        const ticket = await requireAuthorizedTicket(socket, targetTicketId);
+        if (!ticket) return;
+      } else if (!requireAdminSocket(socket)) {
+        return;
+      }
+
       if (!targetTicketId && telefonoDestino) {
         const ticket = await db.createTicket({
           chat_id:        telefonoDestino,
@@ -308,20 +430,22 @@ function setupSockets(io, client, borrarSesion) {
         }
         await db.closeTicket(targetTicketId);
         await db.saveMessage({ ticket_id: targetTicketId, chat_id: telefonoDestino || '', body: mensajeDerivacion, from_user: false, is_bot: true });
-        io.emit('ticket-closed', { ticketId: targetTicketId });
+        const areaId = await resolveTicketArea(targetTicketId);
+        emitOperational(io, 'ticket-closed', { ticketId: targetTicketId }, areaId);
       }
 
       if (telefonoDestino) {
         try {
           await client.sendMessage(telefonoDestino, mensajeDerivacion);
-          io.emit('new-message', {
+          const areaId = await resolveTicketArea(targetTicketId);
+          emitOperational(io, 'new-message', {
             chatId:    telefonoDestino,
             ticketId:  targetTicketId || null,
             message:   mensajeDerivacion,
             from_user: false,
             is_bot:    true,
             timestamp: new Date().toISOString(),
-          });
+          }, areaId);
         } catch (e) {
           console.warn('Error enviando mensaje de derivación:', e.message);
         }
@@ -331,6 +455,7 @@ function setupSockets(io, client, borrarSesion) {
     });
 
     socket.on('get-stats', async () => {
+      if (!requireAdminSocket(socket)) return;
       const stats = await db.getStats();
       socket.emit('stats-data', {
         total:   stats.total,
@@ -347,4 +472,4 @@ function setupSockets(io, client, borrarSesion) {
   });
 }
 
-module.exports = { setupSockets };
+module.exports = { setupSockets, emitInitialWhatsAppAuthState, emitAdminOperation, emitAdminChatOperation };

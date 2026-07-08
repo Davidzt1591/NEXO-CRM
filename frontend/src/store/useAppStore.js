@@ -8,10 +8,10 @@ function loadSession(key, fallback) {
   } catch { return fallback; }
 }
 function saveSession(key, data) {
-  try { sessionStorage.setItem(key, JSON.stringify(data)); } catch {}
+  try { sessionStorage.setItem(key, JSON.stringify(data)); } catch { /* Session storage persistence is best-effort. */ }
 }
 
-export const useAppStore = create((set, get) => ({
+export const useAppStore = create((set) => ({
   botStatus: 'disconnected',
   botActivo: false,
   qrDataUrl: null,

@@ -7,10 +7,12 @@ const { createClient } = require('@supabase/supabase-js');
 const crypto = require('crypto');
 
 const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
+// Server-side backend operations use admin/RLS-protected tables; prefer service_role.
+// SUPABASE_ANON_KEY remains a local-development fallback only.
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
 
 if (!supabaseUrl || !supabaseKey) {
-  console.error('❌ Error: SUPABASE_URL o SUPABASE_ANON_KEY no configurados en .env');
+  console.error('❌ Error: SUPABASE_URL and a Supabase backend key are required. Prefer SUPABASE_SERVICE_ROLE_KEY server-side.');
 }
 
 // Strictly configured Supabase Client (No TLS reject bypass)
@@ -31,7 +33,7 @@ function hashToken(token) {
 
 // ── Ticket Operations ──────────────────────────────────────────────────────
 
-async function createTicket({ chat_id, telefono, nombre_analista, nombre_empresa, correo, situacion, prioridad }) {
+async function createTicket({ chat_id, telefono, nombre_analista, nombre_empresa, correo, situacion, prioridad, area_id }) {
   const payload = {
     chat_id,
     telefono: telefono || null,
@@ -42,6 +44,8 @@ async function createTicket({ chat_id, telefono, nombre_analista, nombre_empresa
     prioridad: prioridad || null,
     status: 'open'
   };
+
+  if (area_id) payload.area_id = area_id;
 
   const { data, error } = await supabase
     .from('tickets')
@@ -99,6 +103,39 @@ async function getTicketById(id) {
     return null;
   }
   return data;
+}
+
+async function getTicketAssignment(ticketId) {
+  const { data, error } = await supabase
+    .from('ticket_assignments')
+    .select('*')
+    .eq('ticket_id', ticketId)
+    .maybeSingle();
+
+  if (error) {
+    console.error(`❌ Error Supabase al buscar asignación de ticket #${ticketId}:`, error.message);
+    return null;
+  }
+  return data;
+}
+
+async function getTicketWithAssignment(id) {
+  const ticket = await getTicketById(id);
+  if (!ticket) return null;
+  ticket.assignment = await getTicketAssignment(id);
+  return ticket;
+}
+
+async function listTicketAssignments() {
+  const { data, error } = await supabase
+    .from('ticket_assignments')
+    .select('*');
+
+  if (error) {
+    console.error('❌ Error Supabase al listar asignaciones de tickets:', error.message);
+    throw error;
+  }
+  return data || [];
 }
 
 async function deleteTicket(id) {
@@ -306,6 +343,174 @@ async function revokeToken(id) {
   if (error) console.error('❌ Error Supabase al revocar token:', error.message);
 }
 
+// ── Admin Operations ───────────────────────────────────────────────────────
+
+async function listAreas({ includeInactive = true } = {}) {
+  let query = supabase
+    .from('areas')
+    .select('*')
+    .order('name', { ascending: true });
+
+  if (!includeInactive) query = query.eq('active', true);
+
+  const { data, error } = await query;
+  if (error) {
+    console.error('❌ Error Supabase al listar áreas:', error.message);
+    throw error;
+  }
+  return data || [];
+}
+
+async function createArea({ name, description, welcome_msg, active = true, sla_minutes = 30 }) {
+  const payload = {
+    name,
+    description: description || null,
+    welcome_msg: welcome_msg || null,
+    active: active !== false,
+    sla_minutes: Number.isFinite(Number(sla_minutes)) ? Number(sla_minutes) : 30,
+  };
+
+  const { data, error } = await supabase
+    .from('areas')
+    .insert(payload)
+    .select()
+    .single();
+
+  if (error) {
+    console.error('❌ Error Supabase al crear área:', error.message);
+    throw error;
+  }
+  return data;
+}
+
+async function updateArea(id, changes) {
+  const allowed = ['name', 'description', 'welcome_msg', 'active', 'sla_minutes'];
+  const payload = {};
+  for (const key of allowed) {
+    if (Object.prototype.hasOwnProperty.call(changes, key)) payload[key] = changes[key];
+  }
+
+  const { data, error } = await supabase
+    .from('areas')
+    .update(payload)
+    .eq('id', id)
+    .select()
+    .single();
+
+  if (error) {
+    console.error(`❌ Error Supabase al actualizar área #${id}:`, error.message);
+    throw error;
+  }
+  return data;
+}
+
+async function listAnalysts() {
+  const { data, error } = await supabase
+    .from('analysts')
+    .select('*, area:areas(*), token:dashboard_tokens(id, name, role, active)')
+    .order('display_name', { ascending: true });
+
+  if (error) {
+    console.error('❌ Error Supabase al listar analistas:', error.message);
+    throw error;
+  }
+  return data || [];
+}
+
+async function createAnalyst({ token_id, area_id, display_name, available = false }) {
+  const payload = {
+    token_id: token_id || null,
+    area_id: area_id || null,
+    display_name,
+    available: !!available,
+    last_seen: null,
+  };
+
+  const { data, error } = await supabase
+    .from('analysts')
+    .insert(payload)
+    .select()
+    .single();
+
+  if (error) {
+    console.error('❌ Error Supabase al crear analista:', error.message);
+    throw error;
+  }
+  return data;
+}
+
+async function updateAnalyst(id, changes) {
+  const allowed = ['token_id', 'area_id', 'display_name', 'available', 'last_seen'];
+  const payload = {};
+  for (const key of allowed) {
+    if (Object.prototype.hasOwnProperty.call(changes, key)) payload[key] = changes[key];
+  }
+
+  const { data, error } = await supabase
+    .from('analysts')
+    .update(payload)
+    .eq('id', id)
+    .select()
+    .single();
+
+  if (error) {
+    console.error(`❌ Error Supabase al actualizar analista #${id}:`, error.message);
+    throw error;
+  }
+  return data;
+}
+
+async function getAnalystByTokenId(tokenId) {
+  if (!tokenId) return null;
+
+  const { data, error } = await supabase
+    .from('analysts')
+    .select('*, area:areas(*)')
+    .eq('token_id', tokenId)
+    .maybeSingle();
+
+  if (error) {
+    console.error(`❌ Error Supabase al buscar analista por token #${tokenId}:`, error.message);
+    return null;
+  }
+  return data;
+}
+
+async function logAudit({ actor_name, actor_role, action, target_id, metadata }) {
+  const { data, error } = await supabase
+    .from('audit_log')
+    .insert({
+      actor_name,
+      actor_role,
+      action,
+      target_id: target_id || null,
+      metadata: metadata || null,
+    })
+    .select()
+    .single();
+
+  if (error) {
+    console.error('❌ Error Supabase al escribir auditoría:', error.message);
+    return null;
+  }
+  return data;
+}
+
+async function listAuditLogs(limit = 100) {
+  const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 500);
+  const { data, error } = await supabase
+    .from('audit_log')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .limit(safeLimit);
+
+  if (error) {
+    console.error('❌ Error Supabase al listar auditoría:', error.message);
+    throw error;
+  }
+  return data || [];
+}
+
 // Mock closing for Supabase (no active connections/intervals to clear like SQLite)
 function initDb() { return Promise.resolve(true); }
 function persistDb() { return Promise.resolve(true); }
@@ -321,6 +526,9 @@ module.exports = {
   closeTicket,
   getTickets,
   getTicketById,
+  getTicketAssignment,
+  getTicketWithAssignment,
+  listTicketAssignments,
   deleteTicket,
   // Messages
   saveMessage,
@@ -339,5 +547,15 @@ module.exports = {
   createToken,
   validateToken,
   getTokens,
-  revokeToken
+  revokeToken,
+  // Admin
+  listAreas,
+  createArea,
+  updateArea,
+  listAnalysts,
+  createAnalyst,
+  updateAnalyst,
+  getAnalystByTokenId,
+  logAudit,
+  listAuditLogs
 };

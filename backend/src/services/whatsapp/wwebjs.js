@@ -1,11 +1,11 @@
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
-const qrcode = require('qrcode-terminal');
 const fs     = require('fs');
 const path   = require('path');
 const store  = require('../../store');
 const db     = require('../../database/db');
 const { analizarPrioridad } = require('../ai');
 const { crearCase }         = require('../salesforce');
+const { emitOperational }   = require('../../realtime/operational');
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -37,6 +37,12 @@ function estaEnHorarioLaboral() {
   if (dia >= 1 && dia <= 4) return t >= 7 && t < 17;
   if (dia === 5)             return t >= 7 && t < 16;
   return false;
+}
+
+async function resolveTicketArea(ticketId) {
+  if (!ticketId) return null;
+  const ticket = await db.getTicketById(ticketId);
+  return ticket?.area_id || null;
 }
 
 // ── Session sync: memory ↔ Supabase ──────────────────────────────────────────
@@ -109,7 +115,8 @@ function setupWhatsApp(io) {
       savedId = saved?.id;
     }
 
-    io.emit('new-message', {
+    const areaId = await resolveTicketArea(ticketId);
+    emitOperational(io, 'new-message', {
       chatId:      cid,
       ticketId,
       message:     texto,
@@ -118,7 +125,7 @@ function setupWhatsApp(io) {
       is_bot:      true,
       timestamp,
       id:          savedId,
-    });
+    }, areaId);
   }
 
   // ── WhatsApp events ──────────────────────────────────────────────────────
@@ -131,21 +138,20 @@ function setupWhatsApp(io) {
     if (now - store.lastQRTime < store.QR_THROTTLE) return;
     store.lastQRTime = now;
 
-    console.log('\n📱 Escanea el QR con WhatsApp:\n');
-    qrcode.generate(qr, { small: true });
-    io.emit('qr', { qr, expiresIn: 20 });
+    console.log('📱 QR de WhatsApp generado para administradores');
+    io.to('admin').emit('qr', { qr, expiresIn: 20 });
   });
 
   client.on('ready', () => {
     console.log('✅ NEXO Bot listo — sistema operativo');
     store.lastQR       = null;
     store.horaDeInicio = Math.floor(Date.now() / 1000);
-    io.emit('bot-status', { status: 'ready' });
+    io.to('admin').emit('bot-status', { status: 'ready' });
   });
 
   client.on('disconnected', (reason) => {
     console.warn('❌ Bot desconectado:', reason);
-    io.emit('bot-status', { status: 'disconnected', reason });
+    io.to('admin').emit('bot-status', { status: 'disconnected', reason });
   });
 
   client.on('message_create', async (message) => {
@@ -193,8 +199,23 @@ function setupWhatsApp(io) {
 
     const sesion = store.sesiones[chatId];
 
-    // Emit incoming message to dashboard
-    io.emit('new-message', {
+    // Persist message if ticket exists
+    let savedId = null;
+    if (sesion?.ticketId) {
+      const saved = await db.saveMessage({
+        ticket_id:    sesion.ticketId,
+        chat_id:      chatId,
+        body:         displayBody,
+        from_user:    true,
+        is_bot:       false,
+        wa_message_id: message.id._serialized,
+      });
+      savedId = saved?.id;
+    }
+
+    // Emit incoming message to scoped admin/area rooms when ticket area exists.
+    const areaId = await resolveTicketArea(sesion?.ticketId || null);
+    emitOperational(io, 'new-message', {
       chatId,
       ticketId:    sesion?.ticketId || null,
       message:     displayBody,
@@ -203,19 +224,8 @@ function setupWhatsApp(io) {
       from_user:   true,
       is_bot:      false,
       timestamp:   new Date().toISOString(),
-    });
-
-    // Persist message if ticket exists
-    if (sesion?.ticketId) {
-      await db.saveMessage({
-        ticket_id:    sesion.ticketId,
-        chat_id:      chatId,
-        body:         displayBody,
-        from_user:    true,
-        is_bot:       false,
-        wa_message_id: message.id._serialized,
-      });
-    }
+      id:          savedId,
+    }, areaId);
 
     // ── Guards ───────────────────────────────────────────────────────────
     if (!store.botActivo)                            return;
@@ -340,7 +350,7 @@ function setupWhatsApp(io) {
         s.paso     = 5;
         await syncSessionToDb(chatId);
 
-        io.emit('ticket-created', ticket);
+        emitOperational(io, 'ticket-created', ticket, ticket.area_id || null);
 
         // ── Create Salesforce Case ─────────────────────────────────────
         let sfCaseNumber = null;
@@ -360,11 +370,11 @@ function setupWhatsApp(io) {
           // Update local ticket with SF reference
           await db.updateTicketSalesforce(ticket.id, { sf_case_id: sfCaseId, sf_case_number: sfCaseNumber });
 
-          io.emit('sf-case-created', {
+          emitOperational(io, 'sf-case-created', {
             contactKey:     String(ticket.id),
             sf_case_id:     sfCaseId,
             sf_case_number: sfCaseNumber,
-          });
+          }, ticket.area_id || null);
         } catch (sfErr) {
           console.warn('⚠️ Salesforce no disponible, ticket local creado:', sfErr.message);
         }
