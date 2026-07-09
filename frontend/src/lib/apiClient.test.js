@@ -9,6 +9,13 @@ function jsonResponse(payload, init = {}) {
   });
 }
 
+function htmlResponse(html, init = {}) {
+  return new Response(html, {
+    status: init.status || 200,
+    headers: { 'Content-Type': 'text/html; charset=utf-8' },
+  });
+}
+
 function mockLocalStorage() {
   const store = new Map();
   const storage = {
@@ -43,6 +50,36 @@ describe('apiRequest', () => {
     expect(options.headers.get('Content-Type')).toBe('application/json');
     expect(options.headers.get('Authorization')).toBe('Bearer admin-token');
     expect(options.body).toBe(JSON.stringify({ name: 'Billing' }));
+  });
+
+  it('uses relative /api requests by default so Vite can proxy them in development', async () => {
+    await apiRequest('/api/admin/areas');
+
+    expect(fetch).toHaveBeenCalledWith('/api/admin/areas', expect.objectContaining({
+      headers: expect.any(Headers),
+    }));
+  });
+
+  it('does not send dashboard auth to external URLs', async () => {
+    localStorage.setItem('nexo_token', 'admin-token');
+
+    await apiRequest('https://example.com/api/admin/areas');
+
+    const [, options] = fetch.mock.calls[0];
+
+    expect(options.headers.get('Authorization')).toBeNull();
+  });
+
+  it('throws a friendly Spanish error with metadata when the API returns HTML instead of JSON', async () => {
+    fetch.mockResolvedValueOnce(htmlResponse('<!DOCTYPE html><html><body>Vite fallback</body></html>', { status: 200 }));
+
+    await expect(apiRequest('/api/admin/areas')).rejects.toMatchObject({
+      message: expect.stringContaining('No se pudo conectar con la API del backend'),
+      status: 200,
+      contentType: 'text/html; charset=utf-8',
+      bodySnippet: expect.stringContaining('<!DOCTYPE html>'),
+      data: null,
+    });
   });
 
   it('throws status and response data for 403 responses', async () => {

@@ -44,7 +44,7 @@ function mockLocalStorage() {
 
 function mockAdminFetch() {
   globalThis.fetch = vi.fn((url, options = {}) => {
-    const { pathname } = new URL(url);
+    const { pathname } = new URL(url, window.location.origin);
 
     if (options.method === 'POST' || options.method === 'PATCH') {
       return Promise.resolve(jsonResponse({ ok: true }));
@@ -59,7 +59,7 @@ function mockAdminFetch() {
 
 function requestFor(method, path) {
   return fetch.mock.calls.find(([url, options = {}]) => {
-    const { pathname } = new URL(url);
+    const { pathname } = new URL(url, window.location.origin);
     return pathname === path && options.method === method;
   })?.[1];
 }
@@ -75,23 +75,40 @@ describe('AdminPanel', () => {
     vi.restoreAllMocks();
   });
 
-  it('shows the forbidden state when the admin API returns 403', async () => {
+  it('shows the forbidden state in Spanish when the admin API returns 403', async () => {
     globalThis.fetch = vi.fn(() => Promise.resolve(jsonResponse({ error: 'Forbidden' }, { status: 403 })));
 
     render(<AdminPanel onLogout={vi.fn()} />);
 
-    expect(await screen.findByText('Admin access required')).toBeInTheDocument();
-    expect(screen.getByText(/cannot access the administration panel/i)).toBeInTheDocument();
+    expect(await screen.findByText('Se requiere acceso administrativo')).toBeInTheDocument();
+    expect(screen.getByText(/no tiene permisos para ingresar al panel de administración/i)).toBeInTheDocument();
   });
 
-  it('renders areas and analysts from successful admin API responses', async () => {
+  it('renders the Spanish Phase 2 admin intro, areas, and analysts from successful admin API responses', async () => {
     mockAdminFetch();
 
     render(<AdminPanel onLogout={vi.fn()} />);
 
+    expect(await screen.findByText('Panel de administración')).toBeInTheDocument();
+    expect(screen.getByText(/En esta fase, \/admin contiene la configuración de áreas de soporte/i)).toBeInTheDocument();
+    expect(screen.getByText(/Flujos del bot, reportes, carga de Salesforce/i)).toBeInTheDocument();
     expect(await screen.findAllByText('Billing')).not.toHaveLength(0);
     expect(screen.getByText('Ada Lovelace')).toBeInTheDocument();
     expect(screen.getByText('Ada token')).toBeInTheDocument();
+    expect(screen.queryByText('Admin Panel')).not.toBeInTheDocument();
+    expect(screen.queryByText('Operations topology')).not.toBeInTheDocument();
+  });
+
+  it('surfaces the friendly Spanish backend connectivity error when HTML is returned', async () => {
+    globalThis.fetch = vi.fn(() => Promise.resolve(new Response('<!DOCTYPE html><html></html>', {
+      status: 200,
+      headers: { 'Content-Type': 'text/html' },
+    })));
+
+    render(<AdminPanel onLogout={vi.fn()} />);
+
+    expect(await screen.findByText(/No se pudo conectar con la API del backend/i)).toBeInTheDocument();
+    expect(screen.getByText(/Endpoint: \/api\/admin\/areas/i)).toBeInTheDocument();
   });
 
   it('sends JSON bodies with Content-Type for create, update, and availability toggle calls', async () => {
@@ -101,8 +118,8 @@ describe('AdminPanel', () => {
     render(<AdminPanel onLogout={vi.fn()} />);
     await screen.findByText('Ada Lovelace');
 
-    await user.type(screen.getByLabelText('Name'), 'Integrations');
-    await user.click(screen.getByRole('button', { name: /create area/i }));
+    await user.type(screen.getByLabelText('Nombre'), 'Integrations');
+    await user.click(screen.getByRole('button', { name: /crear área/i }));
 
     await waitFor(() => expect(requestFor('POST', '/api/admin/areas')).toBeTruthy());
     const createAreaRequest = requestFor('POST', '/api/admin/areas');
@@ -110,15 +127,15 @@ describe('AdminPanel', () => {
     expect(createAreaRequest.headers.get('Authorization')).toBe('Bearer admin-token');
     expect(JSON.parse(createAreaRequest.body)).toMatchObject({ name: 'Integrations', sla_minutes: 30 });
 
-    await user.click(screen.getAllByRole('button', { name: 'Edit' })[0]);
-    await user.click(screen.getByRole('button', { name: /update area/i }));
+    await user.click(screen.getAllByRole('button', { name: 'Editar' })[0]);
+    await user.click(screen.getByRole('button', { name: /actualizar área/i }));
 
     await waitFor(() => expect(requestFor('PATCH', '/api/admin/areas/1')).toBeTruthy());
     const updateAreaRequest = requestFor('PATCH', '/api/admin/areas/1');
     expect(updateAreaRequest.headers.get('Content-Type')).toBe('application/json');
     expect(JSON.parse(updateAreaRequest.body)).toMatchObject({ name: 'Billing', sla_minutes: 15 });
 
-    await user.click(screen.getByRole('button', { name: 'Enable' }));
+    await user.click(screen.getByRole('button', { name: 'Habilitar' }));
 
     await waitFor(() => expect(requestFor('PATCH', '/api/admin/analysts/2')).toBeTruthy());
     const toggleRequest = requestFor('PATCH', '/api/admin/analysts/2');

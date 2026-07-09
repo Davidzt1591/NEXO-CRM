@@ -36,7 +36,7 @@ const EMPTY_ANALYST_FORM = {
 };
 
 function formatDate(value) {
-  if (!value) return 'Never';
+  if (!value) return 'Nunca';
   return new Date(value).toLocaleString('es-CO', {
     day: '2-digit',
     month: 'short',
@@ -120,7 +120,7 @@ export default function AdminPanel({ socket, onLogout }) {
       setLastRefresh(new Date());
     } catch (err) {
       if (err.status === 403) setForbidden(true);
-      setError(err.message || 'Admin data could not be loaded.');
+      setError(err.message || 'No se pudo cargar la información administrativa.');
     } finally {
       setLoading(false);
     }
@@ -195,19 +195,19 @@ export default function AdminPanel({ socket, onLogout }) {
           method: 'PATCH',
           body: jsonBody(payload),
         });
-        setNotice('Area updated.');
+        setNotice('Área actualizada.');
       } else {
         await apiRequest('/api/admin/areas', {
           method: 'POST',
           body: jsonBody(payload),
         });
-        setNotice('Area created.');
+        setNotice('Área creada.');
       }
 
       resetAreaForm();
       await loadAdminData({ backgroundRefresh: true });
     } catch (err) {
-      setError(err.message || 'Area could not be saved.');
+      setError(err.message || 'No se pudo guardar el área.');
     } finally {
       setSavingArea(false);
     }
@@ -228,19 +228,19 @@ export default function AdminPanel({ socket, onLogout }) {
           method: 'PATCH',
           body: jsonBody(payload),
         });
-        setNotice('Analyst updated.');
+        setNotice('Analista actualizado.');
       } else {
         await apiRequest('/api/admin/analysts', {
           method: 'POST',
           body: jsonBody(payload),
         });
-        setNotice('Analyst created.');
+        setNotice('Analista creado.');
       }
 
       resetAnalystForm();
       await loadAdminData({ backgroundRefresh: true });
     } catch (err) {
-      setError(err.message || 'Analyst could not be saved.');
+      setError(err.message || 'No se pudo guardar el analista.');
     } finally {
       setSavingAnalyst(false);
     }
@@ -255,10 +255,10 @@ export default function AdminPanel({ socket, onLogout }) {
         method: 'PATCH',
         body: jsonBody({ available: !analyst.available }),
       });
-      setNotice(`${analyst.display_name} marked ${analyst.available ? 'unavailable' : 'available'}.`);
+      setNotice(`${analyst.display_name} marcado como ${analyst.available ? 'no disponible' : 'disponible'}.`);
       await loadAdminData({ backgroundRefresh: true });
     } catch (err) {
-      setError(err.message || 'Availability could not be changed.');
+      setError(err.message || 'No se pudo cambiar la disponibilidad.');
     }
   };
 
@@ -267,12 +267,12 @@ export default function AdminPanel({ socket, onLogout }) {
       <div className="admin-shell admin-shell--centered">
         <section className="admin-denied-card">
           <div className="admin-denied-card__icon"><ShieldCheck size={34} /></div>
-          <p className="admin-kicker">Restricted route</p>
-          <h1>Admin access required</h1>
-          <p>This token is valid for the analyst dashboard, but it cannot access the administration panel.</p>
+          <p className="admin-kicker">Ruta restringida</p>
+          <h1>Se requiere acceso administrativo</h1>
+          <p>Este token es válido para el panel de analistas, pero no tiene permisos para ingresar al panel de administración.</p>
           <div className="admin-denied-card__actions">
-            <a className="admin-link-btn" href="/">Back to dashboard</a>
-            <button className="admin-link-btn admin-link-btn--danger" onClick={onLogout}>Log out</button>
+            <a className="admin-link-btn" href="/">Volver al panel</a>
+            <button className="admin-link-btn admin-link-btn--danger" onClick={onLogout}>Cerrar sesión</button>
           </div>
         </section>
       </div>
@@ -285,20 +285,20 @@ export default function AdminPanel({ socket, onLogout }) {
         <div className="admin-topbar__brand">
           <div className="topbar__logo">N</div>
           <div>
-            <p className="admin-kicker">NEXO command layer</p>
-            <h1>Admin Panel</h1>
+            <p className="admin-kicker">Capa de control de NEXO</p>
+            <h1>Panel de administración</h1>
           </div>
         </div>
         <div className="admin-topbar__actions">
           <span className="admin-refresh-stamp">
-            <Clock size={14} /> {lastRefresh ? `Updated ${formatDate(lastRefresh)}` : 'Waiting for data'}
+            <Clock size={14} /> {lastRefresh ? `Actualizado ${formatDate(lastRefresh)}` : 'Esperando datos'}
           </span>
           <button className="action-btn action-btn--glass" onClick={() => loadAdminData()} disabled={loading}>
-            <RefreshCw size={16} className={loading ? 'admin-spin' : ''} /> Refresh
+            <RefreshCw size={16} className={loading ? 'admin-spin' : ''} /> Actualizar
           </button>
-          <a className="action-btn action-btn--glass" href="/">Dashboard</a>
+          <a className="action-btn action-btn--glass" href="/">Panel operativo</a>
           <button className="action-btn action-btn--secondary" onClick={onLogout}>
-            <LogOut size={16} /> Log out
+            <LogOut size={16} /> Cerrar sesión
           </button>
         </div>
       </header>
@@ -306,61 +306,61 @@ export default function AdminPanel({ socket, onLogout }) {
       <main className="admin-workspace">
         <section className="admin-hero-card">
           <div>
-            <p className="admin-kicker">Operations topology</p>
-            <h2>Areas, analysts and availability in one control surface.</h2>
+            <p className="admin-kicker">Administración de Fase 2</p>
+            <h2>Áreas de soporte, analistas y disponibilidad en un solo panel.</h2>
             <p>
-              This panel uses the authenticated admin API and refreshes analyst state safely while the backend presence contract matures.
+              En esta fase, /admin contiene la configuración de áreas de soporte, el registro de analistas, la asignación de analistas a áreas y una vista de disponibilidad/presencia. Flujos del bot, reportes, carga de Salesforce y otros módulos administrativos pertenecen a fases futuras.
             </p>
           </div>
           <div className="admin-stat-grid">
-            <AdminStat icon={Building2} label="Active areas" value={activeAreas.length} />
-            <AdminStat icon={Users} label="Analysts" value={analysts.length} tone="purple" />
-            <AdminStat icon={Activity} label="Available" value={availableAnalysts.length} tone="green" />
-            <AdminStat icon={AlertTriangle} label="Unassigned" value={unassignedAnalysts.length} tone="amber" />
+            <AdminStat icon={Building2} label="Áreas activas" value={activeAreas.length} />
+            <AdminStat icon={Users} label="Analistas" value={analysts.length} tone="purple" />
+            <AdminStat icon={Activity} label="Disponibles" value={availableAnalysts.length} tone="green" />
+            <AdminStat icon={AlertTriangle} label="Sin asignar" value={unassignedAnalysts.length} tone="amber" />
           </div>
         </section>
 
         {error && <AdminAlert type="error">{error}</AdminAlert>}
         {notice && <AdminAlert type="success">{notice}</AdminAlert>}
         <AdminAlert>
-          Presence is refreshed every {ADMIN_REFRESH_INTERVAL_MS / 1000} seconds and on socket reconnect. No unsupported realtime event contract is assumed.
+          La presencia se actualiza cada {ADMIN_REFRESH_INTERVAL_MS / 1000} segundos y cuando el socket se reconecta. No se asume ningún contrato de eventos en tiempo real fuera de lo soportado.
         </AdminAlert>
 
         <div className="admin-grid">
           <section className="admin-card admin-card--form">
             <div className="admin-section-heading">
               <div>
-                <p className="admin-kicker">Support areas</p>
-                <h3>{areaForm.id ? 'Edit area' : 'Create area'}</h3>
+                <p className="admin-kicker">Áreas de soporte</p>
+                <h3>{areaForm.id ? 'Editar área' : 'Crear área'}</h3>
               </div>
-              {areaForm.id && <button className="admin-soft-btn" onClick={resetAreaForm}>New area</button>}
+              {areaForm.id && <button className="admin-soft-btn" onClick={resetAreaForm}>Nueva área</button>}
             </div>
 
             <form className="admin-form" onSubmit={submitArea}>
               <label>
-                <span>Name</span>
-                <input value={areaForm.name} onChange={e => setAreaForm(prev => ({ ...prev, name: e.target.value }))} placeholder="Integrations support" />
+                <span>Nombre</span>
+                <input value={areaForm.name} onChange={e => setAreaForm(prev => ({ ...prev, name: e.target.value }))} placeholder="Soporte de integraciones" />
               </label>
               <label>
-                <span>Description</span>
-                <input value={areaForm.description} onChange={e => setAreaForm(prev => ({ ...prev, description: e.target.value }))} placeholder="Scope and ownership" />
+                <span>Descripción</span>
+                <input value={areaForm.description} onChange={e => setAreaForm(prev => ({ ...prev, description: e.target.value }))} placeholder="Alcance y responsable" />
               </label>
               <label>
-                <span>Welcome message</span>
-                <textarea value={areaForm.welcome_msg} onChange={e => setAreaForm(prev => ({ ...prev, welcome_msg: e.target.value }))} rows={4} placeholder="Message used when an area receives a conversation" />
+                <span>Mensaje de bienvenida</span>
+                <textarea value={areaForm.welcome_msg} onChange={e => setAreaForm(prev => ({ ...prev, welcome_msg: e.target.value }))} rows={4} placeholder="Mensaje usado cuando un área recibe una conversación" />
               </label>
               <div className="admin-form__row">
                 <label>
-                  <span>SLA minutes</span>
+                  <span>SLA en minutos</span>
                   <input type="number" min="1" value={areaForm.sla_minutes} onChange={e => setAreaForm(prev => ({ ...prev, sla_minutes: e.target.value }))} />
                 </label>
                 <label className="admin-check-row">
                   <input type="checkbox" checked={areaForm.active} onChange={e => setAreaForm(prev => ({ ...prev, active: e.target.checked }))} />
-                  <span>Active</span>
+                  <span>Activa</span>
                 </label>
               </div>
               <button className="admin-primary-btn" disabled={savingArea || !areaForm.name.trim()}>
-                <Save size={16} /> {savingArea ? 'Saving...' : areaForm.id ? 'Update area' : 'Create area'}
+                <Save size={16} /> {savingArea ? 'Guardando...' : areaForm.id ? 'Actualizar área' : 'Crear área'}
               </button>
             </form>
           </section>
@@ -368,30 +368,30 @@ export default function AdminPanel({ socket, onLogout }) {
           <section className="admin-card admin-card--list">
             <div className="admin-section-heading">
               <div>
-                <p className="admin-kicker">Routing map</p>
-                <h3>Areas</h3>
+                <p className="admin-kicker">Mapa de enrutamiento</p>
+                <h3>Áreas</h3>
               </div>
               {loading && <div className="qr-loading__spinner admin-mini-spinner" />}
             </div>
 
             <div className="admin-list">
-              {areas.length === 0 && !loading ? <p className="admin-empty">No areas configured yet.</p> : null}
+              {areas.length === 0 && !loading ? <p className="admin-empty">Aún no hay áreas configuradas.</p> : null}
               {areas.map(area => (
                 <article key={area.id} className={`admin-list-item ${area.active === false ? 'admin-list-item--muted' : ''}`}>
                   <div>
                     <div className="admin-list-item__title-row">
                       <h4>{area.name}</h4>
                       <span className={`admin-pill ${area.active === false ? 'admin-pill--muted' : 'admin-pill--green'}`}>
-                        {area.active === false ? 'Inactive' : 'Active'}
+                        {area.active === false ? 'Inactiva' : 'Activa'}
                       </span>
                     </div>
-                    <p>{area.description || 'No description yet.'}</p>
+                    <p>{area.description || 'Sin descripción por ahora.'}</p>
                     <div className="admin-meta-row">
                       <span><Clock size={13} /> SLA {area.sla_minutes || DEFAULT_SLA_MINUTES}m</span>
-                      <span>{analysts.filter(analyst => String(analyst.area_id) === String(area.id)).length} analysts</span>
+                      <span>{analysts.filter(analyst => String(analyst.area_id) === String(area.id)).length} analistas</span>
                     </div>
                   </div>
-                  <button className="admin-soft-btn" onClick={() => editArea(area)}>Edit</button>
+                  <button className="admin-soft-btn" onClick={() => editArea(area)}>Editar</button>
                 </article>
               ))}
             </div>
@@ -400,36 +400,36 @@ export default function AdminPanel({ socket, onLogout }) {
           <section className="admin-card admin-card--form">
             <div className="admin-section-heading">
               <div>
-                <p className="admin-kicker">Analyst roster</p>
-                <h3>{analystForm.id ? 'Edit analyst' : 'Create analyst'}</h3>
+                <p className="admin-kicker">Equipo de analistas</p>
+                <h3>{analystForm.id ? 'Editar analista' : 'Crear analista'}</h3>
               </div>
-              {analystForm.id && <button className="admin-soft-btn" onClick={resetAnalystForm}>New analyst</button>}
+              {analystForm.id && <button className="admin-soft-btn" onClick={resetAnalystForm}>Nuevo analista</button>}
             </div>
 
             <form className="admin-form" onSubmit={submitAnalyst}>
               <label>
-                <span>Display name</span>
-                <input value={analystForm.display_name} onChange={e => setAnalystForm(prev => ({ ...prev, display_name: e.target.value }))} placeholder="Analyst name" />
+                <span>Nombre visible</span>
+                <input value={analystForm.display_name} onChange={e => setAnalystForm(prev => ({ ...prev, display_name: e.target.value }))} placeholder="Nombre del analista" />
               </label>
               <div className="admin-form__row">
                 <label>
-                  <span>Token ID</span>
+                  <span>ID del token</span>
                   <input type="number" min="1" value={analystForm.token_id} onChange={e => setAnalystForm(prev => ({ ...prev, token_id: e.target.value }))} placeholder="dashboard_tokens.id" />
                 </label>
                 <label>
-                  <span>Area</span>
+                  <span>Área</span>
                   <select value={analystForm.area_id} onChange={e => setAnalystForm(prev => ({ ...prev, area_id: e.target.value }))}>
-                    <option value="">Unassigned</option>
+                    <option value="">Sin asignar</option>
                     {areas.map(area => <option key={area.id} value={area.id}>{area.name}</option>)}
                   </select>
                 </label>
               </div>
               <label className="admin-check-row">
                 <input type="checkbox" checked={analystForm.available} onChange={e => setAnalystForm(prev => ({ ...prev, available: e.target.checked }))} />
-                <span>Available for routing</span>
+                <span>Disponible para enrutamiento</span>
               </label>
               <button className="admin-primary-btn" disabled={savingAnalyst || !analystForm.display_name.trim()}>
-                <UserCog size={16} /> {savingAnalyst ? 'Saving...' : analystForm.id ? 'Update analyst' : 'Create analyst'}
+                <UserCog size={16} /> {savingAnalyst ? 'Guardando...' : analystForm.id ? 'Actualizar analista' : 'Crear analista'}
               </button>
             </form>
           </section>
@@ -437,27 +437,27 @@ export default function AdminPanel({ socket, onLogout }) {
           <section className="admin-card admin-card--list admin-card--wide">
             <div className="admin-section-heading">
               <div>
-                <p className="admin-kicker">Presence board</p>
-                <h3>Analysts</h3>
+                <p className="admin-kicker">Vista de presencia</p>
+                <h3>Analistas</h3>
               </div>
-              {socket?.connected ? <span className="admin-pill admin-pill--green"><CircleDot size={12} /> Socket online</span> : <span className="admin-pill admin-pill--muted">Socket offline</span>}
+              {socket?.connected ? <span className="admin-pill admin-pill--green"><CircleDot size={12} /> Conexión activa</span> : <span className="admin-pill admin-pill--muted">Conexión inactiva</span>}
             </div>
 
             <div className="admin-table-wrap">
               <table className="admin-table">
                 <thead>
                   <tr>
-                    <th>Analyst</th>
-                    <th>Area</th>
+                    <th>Analista</th>
+                    <th>Área</th>
                     <th>Token</th>
-                    <th>Availability</th>
-                    <th>Last seen</th>
-                    <th>Actions</th>
+                    <th>Disponibilidad</th>
+                    <th>Última actividad</th>
+                    <th>Acciones</th>
                   </tr>
                 </thead>
                 <tbody>
                   {analysts.length === 0 && !loading ? (
-                    <tr><td colSpan="6" className="admin-empty">No analysts configured yet.</td></tr>
+                    <tr><td colSpan="6" className="admin-empty">Aún no hay analistas configurados.</td></tr>
                   ) : analysts.map(analyst => (
                     <tr key={analyst.id}>
                       <td>
@@ -469,19 +469,19 @@ export default function AdminPanel({ socket, onLogout }) {
                           </div>
                         </div>
                       </td>
-                      <td>{analyst.area?.name || 'Unassigned'}</td>
-                      <td>{analyst.token?.name || (analyst.token_id ? `Token #${analyst.token_id}` : 'No token')}</td>
+                      <td>{analyst.area?.name || 'Sin asignar'}</td>
+                      <td>{analyst.token?.name || (analyst.token_id ? `Token #${analyst.token_id}` : 'Sin token')}</td>
                       <td>
                         <span className={`admin-pill ${analyst.available ? 'admin-pill--green' : 'admin-pill--muted'}`}>
-                          {analyst.available ? <Check size={12} /> : null} {analyst.available ? 'Available' : 'Unavailable'}
+                          {analyst.available ? <Check size={12} /> : null} {analyst.available ? 'Disponible' : 'No disponible'}
                         </span>
                       </td>
                       <td>{formatDate(analyst.last_seen)}</td>
                       <td>
                         <div className="admin-row-actions">
-                          <button className="admin-soft-btn" onClick={() => editAnalyst(analyst)}>Edit</button>
+                          <button className="admin-soft-btn" onClick={() => editAnalyst(analyst)}>Editar</button>
                           <button className="admin-soft-btn" onClick={() => toggleAnalystAvailability(analyst)}>
-                            {analyst.available ? 'Pause' : 'Enable'}
+                            {analyst.available ? 'Pausar' : 'Habilitar'}
                           </button>
                         </div>
                       </td>
