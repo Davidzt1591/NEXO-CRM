@@ -5,6 +5,8 @@
  *   node scripts/generate-key.js --name "Analista" --role admin
  */
 
+// If a corporate/self-signed CA is required for Supabase, set NODE_EXTRA_CA_CERTS
+// to a local CA bundle before running this script. Do not disable TLS verification.
 require('dotenv').config({ path: require('path').resolve(__dirname, '..', '.env') });
 const { initDb, createToken, closeDb } = require('../src/database/db');
 

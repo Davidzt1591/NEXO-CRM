@@ -39,6 +39,13 @@ frontend/.env
 .env.test.local
 .env.production.local
 
+# Local private key material (public certificates may remain tracked)
+backend/certs/*.key
+backend/certs/*.pem
+backend/certs/*.p8
+backend/certs/*.p12
+backend/certs/*.pfx
+
 # IDEs and editors
 .idea/
 .vscode/

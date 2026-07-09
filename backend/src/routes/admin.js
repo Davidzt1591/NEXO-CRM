@@ -5,6 +5,7 @@
 const express = require('express');
 const router  = express.Router();
 const db      = require('../database/db');
+const botFlow = require('../services/botFlow');
 
 const asyncHandler = fn => (req, res) =>
   fn(req, res).catch(e => {
@@ -34,6 +35,16 @@ function requirePatchBody(body, allowedFields) {
     err.statusCode = 400;
     throw err;
   }
+}
+
+function optionalAreaId(value, field) {
+  if (value === undefined || value === null || value === '') return null;
+  if (!Number.isInteger(Number(value)) || Number(value) <= 0 || String(value).trim() !== String(Number(value))) {
+    const err = new Error(`${field} must be a positive integer.`);
+    err.statusCode = 400;
+    throw err;
+  }
+  return Number(value);
 }
 
 async function audit(req, action, targetId, metadata) {
@@ -105,6 +116,21 @@ router.patch('/analysts/:id', asyncHandler(async (req, res) => {
 router.get('/audit', asyncHandler(async (req, res) => {
   const logs = await db.listAuditLogs(req.query.limit);
   res.json(logs);
+}));
+
+// ── Bot flows ───────────────────────────────────────────────────────────────
+router.get('/bot-flows', asyncHandler(async (req, res) => {
+  const areaId = optionalAreaId(req.query.area_id, 'area_id');
+  const flows = await db.listActiveBotFlows({ areaId });
+  res.json({ flows, cache: botFlow.getBotFlowCacheStatus() });
+}));
+
+router.post('/bot-flows/cache/invalidate', asyncHandler(async (req, res) => {
+  const areaId = optionalAreaId(req.body?.area_id, 'area_id');
+  botFlow.invalidateBotFlowCache(areaId);
+
+  await audit(req, 'flow.cache_invalidated', areaId || 'global', { area_id: areaId });
+  res.json({ ok: true, cache: botFlow.getBotFlowCacheStatus() });
 }));
 
 module.exports = router;

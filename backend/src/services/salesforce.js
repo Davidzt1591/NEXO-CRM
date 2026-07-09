@@ -29,6 +29,29 @@ const jwt = require('jsonwebtoken');
 const fs = require('fs');
 const path = require('path');
 
+const DEFAULT_PRIVATE_KEY_PATH = path.resolve(__dirname, '..', '..', 'certs', 'salesforce.key');
+
+function resolveSalesforcePrivateKey(env = process.env, fsModule = fs) {
+  if (env.SALESFORCE_PRIVATE_KEY) {
+    return { privateKey: env.SALESFORCE_PRIVATE_KEY.replace(/\\n/g, '\n'), source: 'SALESFORCE_PRIVATE_KEY' };
+  }
+
+  const configuredPath = env.SALESFORCE_PRIVATE_KEY_PATH;
+  if (configuredPath) {
+    const keyPath = path.resolve(configuredPath);
+    if (!fsModule.existsSync(keyPath)) {
+      throw new Error('Salesforce no configurado. SALESFORCE_PRIVATE_KEY_PATH no existe.');
+    }
+    return { privateKey: fsModule.readFileSync(keyPath, 'utf8'), source: 'SALESFORCE_PRIVATE_KEY_PATH' };
+  }
+
+  if (fsModule.existsSync(DEFAULT_PRIVATE_KEY_PATH)) {
+    return { privateKey: fsModule.readFileSync(DEFAULT_PRIVATE_KEY_PATH, 'utf8'), source: DEFAULT_PRIVATE_KEY_PATH };
+  }
+
+  return null;
+}
+
 async function getToken(force = false) {
   if (!force && tokenCache.accessToken && Date.now() < tokenCache.expiresAt) {
     return tokenCache.accessToken;
@@ -38,13 +61,13 @@ async function getToken(force = false) {
     throw new Error('Salesforce no configurado. Agrega SALESFORCE_CLIENT_ID al archivo .env');
   }
 
-  const keyPath = path.resolve(__dirname, '..', '..', 'certs', 'salesforce.key');
+  const keyConfig = resolveSalesforcePrivateKey();
   let accessToken = null;
 
-  // 1. Try JWT Bearer flow if private key exists (Ciberseguridad Production standard)
-  if (fs.existsSync(keyPath)) {
-    console.log('🛡️  Certificado detectado. Iniciando autenticación JWT con Salesforce...');
-    const privateKey = fs.readFileSync(keyPath, 'utf8');
+  // 1. Try JWT Bearer flow if private key material is configured.
+  if (keyConfig) {
+    console.log(`🛡️  Certificado detectado (${keyConfig.source}). Iniciando autenticación JWT con Salesforce...`);
+    const privateKey = keyConfig.privateKey;
     const username = process.env.SALESFORCE_USERNAME || 'soporte.mgt@magnetoglobal.com';
 
     const jwtPayload = {
@@ -417,6 +440,8 @@ async function buscarCuentas(texto) {
 }
 
 module.exports = {
+  DEFAULT_PRIVATE_KEY_PATH,
+  resolveSalesforcePrivateKey,
   getToken,
   getOwnerInfo,
   crearCase,

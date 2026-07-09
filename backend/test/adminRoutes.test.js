@@ -8,9 +8,11 @@ const adminOnly = require('../src/middleware/adminOnly');
 
 const adminPath = path.resolve(__dirname, '../src/routes/admin.js');
 const dbPath = path.resolve(__dirname, '../src/database/db.js');
+const botFlowPath = path.resolve(__dirname, '../src/services/botFlow.js');
 
 function loadAdminRouter(mockDb) {
   delete require.cache[adminPath];
+  delete require.cache[botFlowPath];
   require.cache[dbPath] = {
     id: dbPath,
     filename: dbPath,
@@ -38,6 +40,7 @@ async function withServer(mockDb, user, run) {
   } finally {
     await new Promise(resolve => server.close(resolve));
     delete require.cache[adminPath];
+    delete require.cache[botFlowPath];
     delete require.cache[dbPath];
   }
 }
@@ -81,6 +84,7 @@ function createMockDb(overrides = {}) {
     updateAnalyst: async (id, payload) => ({ id, ...payload }),
     listAuditLogs: async () => [],
     logAudit: async () => ({ id: 1 }),
+    listActiveBotFlows: async () => [{ id: 1, step_key: 'initial_filter', version_id: 1, area_id: null }],
     ...overrides,
   };
 }
@@ -214,5 +218,111 @@ test('/api/admin returns 500 when audit listing rejects', async () => {
     const res = await request(baseUrl, 'GET', '/api/admin/audit');
     assert.equal(res.status, 500);
     assert.deepEqual(res.body, { error: 'audit unavailable' });
+  });
+});
+
+test('/api/admin allows admins to list bot flows and cache status', async () => {
+  const flows = [{ id: 1, step_key: 'ask_name', message: 'Nombre', version_id: 1, area_id: null }];
+  await withServer(createMockDb({
+    listActiveBotFlows: async ({ areaId }) => {
+      assert.equal(areaId, null);
+      return flows;
+    },
+  }), { role: 'admin', name: 'Admin' }, async (baseUrl) => {
+    const res = await request(baseUrl, 'GET', '/api/admin/bot-flows');
+
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body.flows, flows);
+    assert.deepEqual(res.body.cache, []);
+  });
+});
+
+test('/api/admin lists area bot flows with validated area_id', async () => {
+  await withServer(createMockDb({
+    listActiveBotFlows: async ({ areaId }) => {
+      assert.equal(areaId, 3);
+      return [{ id: 2, step_key: 'ask_name', message: 'Nombre', version_id: 2, area_id: 3 }];
+    },
+  }), { role: 'admin', name: 'Admin' }, async (baseUrl) => {
+    const res = await request(baseUrl, 'GET', '/api/admin/bot-flows?area_id=3');
+
+    assert.equal(res.status, 200);
+    assert.equal(res.body.flows[0].area_id, 3);
+  });
+});
+
+test('/api/admin rejects invalid bot flow area_id query', async () => {
+  let dbCalled = false;
+  await withServer(createMockDb({
+    listActiveBotFlows: async () => { dbCalled = true; return []; },
+  }), { role: 'admin', name: 'Admin' }, async (baseUrl) => {
+    const res = await request(baseUrl, 'GET', '/api/admin/bot-flows?area_id=abc');
+
+    assert.equal(res.status, 400);
+    assert.deepEqual(res.body, { error: 'area_id must be a positive integer.' });
+    assert.equal(dbCalled, false);
+  });
+});
+
+test('/api/admin returns 500 when bot flow listing rejects', async () => {
+  await withServer(createMockDb({
+    listActiveBotFlows: async () => { throw new Error('flow lookup failed'); },
+  }), { role: 'admin', name: 'Admin' }, async (baseUrl) => {
+    const res = await request(baseUrl, 'GET', '/api/admin/bot-flows');
+
+    assert.equal(res.status, 500);
+    assert.deepEqual(res.body, { error: 'flow lookup failed' });
+  });
+});
+
+test('/api/admin invalidates bot flow cache and writes audit log', async () => {
+  const audits = [];
+  await withServer(createMockDb({
+    logAudit: async payload => { audits.push(payload); return { id: 1 }; },
+  }), { role: 'admin', name: 'Root' }, async (baseUrl) => {
+    const res = await request(baseUrl, 'POST', '/api/admin/bot-flows/cache/invalidate', { area_id: 3 });
+
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body, { ok: true, cache: [] });
+    assert.equal(audits[0].action, 'flow.cache_invalidated');
+    assert.equal(audits[0].target_id, '3');
+    assert.deepEqual(audits[0].metadata, { area_id: 3 });
+  });
+});
+
+test('/api/admin rejects invalid bot flow invalidation area_id body', async () => {
+  let auditCalled = false;
+  await withServer(createMockDb({
+    logAudit: async () => { auditCalled = true; return { id: 1 }; },
+  }), { role: 'admin', name: 'Admin' }, async (baseUrl) => {
+    const res = await request(baseUrl, 'POST', '/api/admin/bot-flows/cache/invalidate', { area_id: 0 });
+
+    assert.equal(res.status, 400);
+    assert.deepEqual(res.body, { error: 'area_id must be a positive integer.' });
+    assert.equal(auditCalled, false);
+  });
+});
+
+test('/api/admin invalidates global bot flow cache when area_id is omitted', async () => {
+  const audits = [];
+  await withServer(createMockDb({
+    logAudit: async payload => { audits.push(payload); return { id: 1 }; },
+  }), { role: 'admin', name: 'Root' }, async (baseUrl) => {
+    const res = await request(baseUrl, 'POST', '/api/admin/bot-flows/cache/invalidate', {});
+
+    assert.equal(res.status, 200);
+    assert.equal(audits[0].target_id, 'global');
+    assert.deepEqual(audits[0].metadata, { area_id: null });
+  });
+});
+
+test('/api/admin returns 500 when bot flow invalidation audit rejects', async () => {
+  await withServer(createMockDb({
+    logAudit: async () => { throw new Error('audit failed'); },
+  }), { role: 'admin', name: 'Root' }, async (baseUrl) => {
+    const res = await request(baseUrl, 'POST', '/api/admin/bot-flows/cache/invalidate', { area_id: 3 });
+
+    assert.equal(res.status, 500);
+    assert.deepEqual(res.body, { error: 'audit failed' });
   });
 });

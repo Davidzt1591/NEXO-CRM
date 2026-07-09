@@ -1,4 +1,6 @@
 require('dotenv').config();
+// For corporate/self-signed certificate chains, configure NODE_EXTRA_CA_CERTS
+// with a local CA bundle instead of disabling TLS verification globally.
 const express = require('express');
 const { Server } = require('socket.io');
 const http = require('http');

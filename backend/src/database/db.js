@@ -203,7 +203,8 @@ async function getSession(chatId) {
     empresa: data.empresa,
     correo: data.correo,
     situacion: data.situacion,
-    ticketId: data.ticket_id
+    ticketId: data.ticket_id,
+    flowVersionId: data.flow_version_id || undefined
   };
 }
 
@@ -216,12 +217,20 @@ async function saveSession(chatId, session) {
     correo: session.correo ?? null,
     situacion: session.situacion ?? null,
     ticket_id: session.ticketId ?? null,
+    flow_version_id: session.flowVersionId ?? null,
     updated_at: new Date().toISOString()
   };
 
-  const { error } = await supabase
+  let { error } = await supabase
     .from('bot_sessions')
     .upsert(payload, { onConflict: 'chat_id' });
+
+  if (error && /flow_version_id/i.test(error.message || '')) {
+    delete payload.flow_version_id;
+    ({ error } = await supabase
+      .from('bot_sessions')
+      .upsert(payload, { onConflict: 'chat_id' }));
+  }
 
   if (error) console.error('❌ Error Supabase al guardar sesión:', error.message);
 }
@@ -511,6 +520,38 @@ async function listAuditLogs(limit = 100) {
   return data || [];
 }
 
+async function listActiveBotFlows({ areaId = null } = {}) {
+  const safeAreaId = areaId === null || areaId === undefined || areaId === '' ? null : Number(areaId);
+  if (safeAreaId !== null && !Number.isInteger(safeAreaId)) {
+    const err = new Error('areaId must be a numeric identifier.');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  let query = supabase
+    .from('bot_flows')
+    .select('*')
+    .eq('active', true)
+    .order('area_id', { ascending: true, nullsFirst: true })
+    .order('sort_order', { ascending: true })
+    .order('step_key', { ascending: true })
+    .order('version_id', { ascending: false })
+    .order('id', { ascending: true });
+
+  if (safeAreaId) {
+    query = query.or(`area_id.is.null,area_id.eq.${safeAreaId}`);
+  } else {
+    query = query.is('area_id', null);
+  }
+
+  const { data, error } = await query;
+  if (error) {
+    console.error('❌ Error Supabase al listar flujos activos del bot:', error.message);
+    throw error;
+  }
+  return data || [];
+}
+
 // Mock closing for Supabase (no active connections/intervals to clear like SQLite)
 function initDb() { return Promise.resolve(true); }
 function persistDb() { return Promise.resolve(true); }
@@ -557,5 +598,6 @@ module.exports = {
   updateAnalyst,
   getAnalystByTokenId,
   logAudit,
-  listAuditLogs
+  listAuditLogs,
+  listActiveBotFlows
 };
