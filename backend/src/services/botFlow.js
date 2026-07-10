@@ -42,6 +42,8 @@ const FALLBACK_MESSAGES = Object.freeze({
   ticket_error: '⚠️ Ocurrió un error al registrar su solicitud. Por favor intente nuevamente o contacte a soporte.mgt@magnetoglobal.com',
 });
 
+const SUPPORTED_STEP_KEYS = Object.freeze(Object.keys(FALLBACK_MESSAGES));
+
 const cache = new Map();
 let now = () => Date.now();
 
@@ -139,6 +141,7 @@ function _setNow(fn) {
 module.exports = {
   CACHE_TTL_MS,
   FALLBACK_MESSAGES,
+  SUPPORTED_STEP_KEYS,
   getBotMessage,
   getBotFlowCacheStatus,
   invalidateBotFlowCache,

@@ -2,6 +2,11 @@
 -- Execute manually in Supabase SQL editor when ready. This file must not be run automatically.
 -- Idempotent: inserts global version 1 fallback templates only when the step is missing.
 
+-- Enforce one effective bot step per version, area scope, and runtime step key.
+-- COALESCE makes global NULL area rows compare consistently for uniqueness.
+CREATE UNIQUE INDEX IF NOT EXISTS bot_flows_effective_identity_uidx
+ON bot_flows (version_id, COALESCE(area_id, 0), step_key);
+
 INSERT INTO bot_flows (version_id, area_id, step_key, message, sort_order, active)
 SELECT 1, NULL, seed.step_key, seed.message, seed.sort_order, true
 FROM (VALUES

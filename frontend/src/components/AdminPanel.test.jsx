@@ -48,6 +48,14 @@ const QUEUE = {
   ],
 };
 
+const BOT_FLOWS = {
+  flows: [
+    { id: 5, version_id: 1, area_id: null, step_key: 'ask_name', message: 'Por favor indica tu nombre', sort_order: 10, active: true },
+    { id: 6, version_id: 1, area_id: 1, step_key: 'ask_issue', message: 'Describe la novedad técnica', sort_order: 20, active: false },
+  ],
+  cache: [{ key: 'global', area_id: null, source: 'database', version_id: 1, age_ms: 100, expires_in_ms: 59000 }],
+};
+
 function jsonResponse(payload, init = {}) {
   return new Response(JSON.stringify(payload), {
     status: init.status || 200,
@@ -79,6 +87,7 @@ function mockAdminFetch() {
     if (pathname === '/api/admin/areas') return Promise.resolve(jsonResponse(AREAS));
     if (pathname === '/api/admin/analysts') return Promise.resolve(jsonResponse(ANALYSTS));
     if (pathname === '/api/admin/queue') return Promise.resolve(jsonResponse(QUEUE));
+    if (pathname === '/api/admin/bot-flows') return Promise.resolve(jsonResponse(BOT_FLOWS));
 
     return Promise.resolve(jsonResponse({ error: 'Not found' }, { status: 404 }));
   });
@@ -120,6 +129,11 @@ describe('AdminPanel', () => {
     expect(screen.getByText(/Cola híbrida con asignación manual/i)).toBeInTheDocument();
     expect(screen.getByText(/La asignación automática solo aplica a tickets con área definida/i)).toBeInTheDocument();
     expect(screen.getByText('Tickets actuales')).toBeInTheDocument();
+    expect(screen.getByText('Plantillas de mensajes de WhatsApp')).toBeInTheDocument();
+    expect(screen.getByText(/plantillas para momentos específicos/i)).toBeInTheDocument();
+    expect(screen.getByText(/no es un editor visual de flujos todavía/i)).toBeInTheDocument();
+    expect(screen.getByText('ask_name')).toBeInTheDocument();
+    expect(within(screen.getByText('ask_issue').closest('tr')).getByText('Billing')).toBeInTheDocument();
     expect(screen.getByText('Acme')).toBeInTheDocument();
     expect(screen.getByText(/Por vencer/i)).toBeInTheDocument();
     expect(await screen.findAllByText('Billing')).not.toHaveLength(0);
@@ -158,7 +172,7 @@ describe('AdminPanel', () => {
     expect(createAreaRequest.headers.get('Authorization')).toBe('Bearer admin-token');
     expect(JSON.parse(createAreaRequest.body)).toMatchObject({ name: 'Integrations', sla_minutes: 30 });
 
-    await user.click(screen.getAllByRole('button', { name: 'Editar' })[0]);
+    await user.click(within(screen.getByText('Payments help').closest('article')).getByRole('button', { name: 'Editar' }));
     await user.click(screen.getByRole('button', { name: /actualizar área/i }));
 
     await waitFor(() => expect(requestFor('PATCH', '/api/admin/areas/1')).toBeTruthy());
@@ -172,6 +186,46 @@ describe('AdminPanel', () => {
     const toggleRequest = requestFor('PATCH', '/api/admin/analysts/2');
     expect(toggleRequest.headers.get('Content-Type')).toBe('application/json');
     expect(JSON.parse(toggleRequest.body)).toEqual({ available: true });
+  });
+
+  it('creates, edits, toggles, and invalidates bot flow steps from the admin manager', async () => {
+    const user = userEvent.setup();
+    mockAdminFetch();
+
+    render(<AdminPanel onLogout={vi.fn()} />);
+    await screen.findByText('Plantillas de mensajes de WhatsApp');
+
+    await user.selectOptions(screen.getByLabelText('Clave del paso'), 'confirmation');
+    await user.clear(screen.getByLabelText('Mensaje'));
+    await user.type(screen.getByLabelText('Mensaje'), 'Solicitud recibida');
+    await user.click(screen.getByRole('button', { name: /crear paso/i }));
+
+    await waitFor(() => expect(requestFor('POST', '/api/admin/bot-flows')).toBeTruthy());
+    const createFlowRequest = requestFor('POST', '/api/admin/bot-flows');
+    expect(createFlowRequest.headers.get('Content-Type')).toBe('application/json');
+    expect(JSON.parse(createFlowRequest.body)).toMatchObject({
+      version_id: 1,
+      area_id: null,
+      step_key: 'confirmation',
+      message: 'Solicitud recibida',
+      sort_order: 0,
+      active: true,
+    });
+
+    await user.click(within(screen.getByText('ask_name').closest('tr')).getByRole('button', { name: 'Editar' }));
+    await user.click(screen.getByRole('button', { name: /actualizar paso/i }));
+
+    await waitFor(() => expect(requestFor('PATCH', '/api/admin/bot-flows/5')).toBeTruthy());
+    expect(JSON.parse(requestFor('PATCH', '/api/admin/bot-flows/5').body)).toMatchObject({ step_key: 'ask_name' });
+
+    await user.click(within(screen.getByText('ask_issue').closest('tr')).getByRole('button', { name: 'Activar' }));
+
+    await waitFor(() => expect(requestFor('POST', '/api/admin/bot-flows/6/toggle')).toBeTruthy());
+    expect(JSON.parse(requestFor('POST', '/api/admin/bot-flows/6/toggle').body)).toEqual({ active: true });
+
+    await user.click(screen.getByRole('button', { name: /invalidar caché/i }));
+
+    await waitFor(() => expect(requestFor('POST', '/api/admin/bot-flows/cache/invalidate')).toBeTruthy());
   });
 
   it('cleans up polling and socket listeners on unmount', async () => {

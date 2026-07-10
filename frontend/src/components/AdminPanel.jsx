@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Activity,
   AlertTriangle,
+  Bot,
   Building2,
   Check,
   CircleDot,
@@ -35,6 +36,32 @@ const EMPTY_ANALYST_FORM = {
   available: false,
 };
 
+const EMPTY_FLOW_FORM = {
+  id: null,
+  version_id: 1,
+  area_id: '',
+  step_key: '',
+  message: '',
+  sort_order: 0,
+  active: true,
+};
+
+const SUPPORTED_BOT_FLOW_STEPS = Object.freeze([
+  { key: 'out_of_office', label: 'Fuera de horario' },
+  { key: 'initial_filter', label: 'Filtro inicial de soporte' },
+  { key: 'ask_name', label: 'Solicitar nombre completo' },
+  { key: 'filter_no_menu', label: 'Menú para solicitudes no relacionadas' },
+  { key: 'filter_no_analyst', label: 'Respuesta para analistas' },
+  { key: 'filter_no_candidate', label: 'Respuesta para candidatos' },
+  { key: 'filter_no_invalid', label: 'Respuesta inválida del filtro' },
+  { key: 'ask_company', label: 'Solicitar empresa o cliente' },
+  { key: 'ask_email', label: 'Solicitar correo corporativo' },
+  { key: 'ask_issue', label: 'Solicitar descripción de la incidencia' },
+  { key: 'processing', label: 'Procesando solicitud' },
+  { key: 'confirmation', label: 'Confirmación de ticket creado' },
+  { key: 'ticket_error', label: 'Error al crear ticket' },
+]);
+
 function formatDate(value) {
   if (!value) return 'Nunca';
   return new Date(value).toLocaleString('es-CO', {
@@ -66,6 +93,17 @@ function normalizeAnalystPayload(form) {
     token_id: normalizeId(form.token_id),
     area_id: normalizeId(form.area_id),
     available: !!form.available,
+  };
+}
+
+function normalizeFlowPayload(form) {
+  return {
+    version_id: Number(form.version_id) || 1,
+    area_id: normalizeId(form.area_id),
+    step_key: form.step_key.trim(),
+    message: form.message.trim(),
+    sort_order: Number(form.sort_order) || 0,
+    active: !!form.active,
   };
 }
 
@@ -110,14 +148,18 @@ export default function AdminPanel({ socket, onLogout }) {
   const [analysts, setAnalysts] = useState([]);
   const [areaForm, setAreaForm] = useState(EMPTY_AREA_FORM);
   const [analystForm, setAnalystForm] = useState(EMPTY_ANALYST_FORM);
+  const [flowForm, setFlowForm] = useState(EMPTY_FLOW_FORM);
   const [loading, setLoading] = useState(true);
   const [savingArea, setSavingArea] = useState(false);
   const [savingAnalyst, setSavingAnalyst] = useState(false);
+  const [savingFlow, setSavingFlow] = useState(false);
   const [error, setError] = useState(null);
   const [notice, setNotice] = useState(null);
   const [forbidden, setForbidden] = useState(false);
   const [lastRefresh, setLastRefresh] = useState(null);
   const [queueTickets, setQueueTickets] = useState([]);
+  const [botFlows, setBotFlows] = useState([]);
+  const [flowCache, setFlowCache] = useState([]);
   const [assigningTicketId, setAssigningTicketId] = useState(null);
 
   const loadAdminData = useCallback(async ({ backgroundRefresh = false } = {}) => {
@@ -125,15 +167,18 @@ export default function AdminPanel({ socket, onLogout }) {
     setError(null);
 
     try {
-      const [nextAreas, nextAnalysts, nextQueue] = await Promise.all([
+      const [nextAreas, nextAnalysts, nextQueue, nextFlows] = await Promise.all([
         apiRequest('/api/admin/areas'),
         apiRequest('/api/admin/analysts'),
         apiRequest('/api/admin/queue'),
+        apiRequest('/api/admin/bot-flows?active=all'),
       ]);
 
       setAreas(Array.isArray(nextAreas) ? nextAreas : []);
       setAnalysts(Array.isArray(nextAnalysts) ? nextAnalysts : []);
       setQueueTickets(Array.isArray(nextQueue?.tickets) ? nextQueue.tickets : []);
+      setBotFlows(Array.isArray(nextFlows?.flows) ? nextFlows.flows : []);
+      setFlowCache(Array.isArray(nextFlows?.cache) ? nextFlows.cache : []);
       setForbidden(false);
       setLastRefresh(new Date());
     } catch (err) {
@@ -179,11 +224,12 @@ export default function AdminPanel({ socket, onLogout }) {
   const activeAreas = useMemo(() => areas.filter(area => area.active !== false), [areas]);
   const availableAnalysts = useMemo(() => analysts.filter(analyst => analyst.available), [analysts]);
   const activeQueueTickets = useMemo(() => queueTickets.filter(ticket => ticket.status !== 'closed'), [queueTickets]);
-  const unassignedQueueTickets = useMemo(() => activeQueueTickets.filter(ticket => !ticket.assignment?.analyst_id), [activeQueueTickets]);
   const slaRiskTickets = useMemo(() => activeQueueTickets.filter(ticket => ['warning', 'breached'].includes(ticket.sla?.state)), [activeQueueTickets]);
+  const areaNameById = useMemo(() => new Map(areas.map(area => [String(area.id), area.name])), [areas]);
 
   const resetAreaForm = () => setAreaForm(EMPTY_AREA_FORM);
   const resetAnalystForm = () => setAnalystForm(EMPTY_ANALYST_FORM);
+  const resetFlowForm = () => setFlowForm(EMPTY_FLOW_FORM);
 
   const editArea = (area) => {
     setAreaForm({
@@ -203,6 +249,18 @@ export default function AdminPanel({ socket, onLogout }) {
       token_id: analyst.token_id || '',
       area_id: analyst.area_id || '',
       available: !!analyst.available,
+    });
+  };
+
+  const editFlow = (flow) => {
+    setFlowForm({
+      id: flow.id,
+      version_id: flow.version_id || 1,
+      area_id: flow.area_id || '',
+      step_key: flow.step_key || '',
+      message: flow.message || '',
+      sort_order: flow.sort_order || 0,
+      active: flow.active !== false,
     });
   };
 
@@ -288,6 +346,69 @@ export default function AdminPanel({ socket, onLogout }) {
     }
   };
 
+  const submitFlow = async (event) => {
+    event.preventDefault();
+    if (!flowForm.step_key.trim() || !flowForm.message.trim() || !flowForm.version_id) return;
+
+    setSavingFlow(true);
+    setError(null);
+    setNotice(null);
+
+    try {
+      const payload = normalizeFlowPayload(flowForm);
+      if (flowForm.id) {
+        await apiRequest(`/api/admin/bot-flows/${flowForm.id}`, {
+          method: 'PATCH',
+          body: jsonBody(payload),
+        });
+        setNotice('Paso del bot actualizado. La caché fue invalidada.');
+      } else {
+        await apiRequest('/api/admin/bot-flows', {
+          method: 'POST',
+          body: jsonBody(payload),
+        });
+        setNotice('Paso del bot creado. La caché fue invalidada.');
+      }
+
+      resetFlowForm();
+      await loadAdminData({ backgroundRefresh: true });
+    } catch (err) {
+      setError(err.message || 'No se pudo guardar el paso del bot.');
+    } finally {
+      setSavingFlow(false);
+    }
+  };
+
+  const toggleFlowActive = async (flow) => {
+    setError(null);
+    setNotice(null);
+
+    try {
+      await apiRequest(`/api/admin/bot-flows/${flow.id}/toggle`, {
+        method: 'POST',
+        body: jsonBody({ active: !flow.active }),
+      });
+      setNotice(`Paso ${flow.step_key} ${flow.active ? 'desactivado' : 'activado'}. La caché fue invalidada.`);
+      await loadAdminData({ backgroundRefresh: true });
+    } catch (err) {
+      setError(err.message || 'No se pudo cambiar el estado del paso.');
+    }
+  };
+
+  const invalidateFlowCache = async () => {
+    setError(null);
+    setNotice(null);
+
+    try {
+      const result = await apiRequest('/api/admin/bot-flows/cache/invalidate', { method: 'POST', body: jsonBody({}) });
+      setFlowCache(Array.isArray(result?.cache) ? result.cache : []);
+      setNotice('Caché de flujos del bot invalidada.');
+      await loadAdminData({ backgroundRefresh: true });
+    } catch (err) {
+      setError(err.message || 'No se pudo invalidar la caché de flujos.');
+    }
+  };
+
   const assignTicket = async (ticket, analystId) => {
     setAssigningTicketId(ticket.id);
     setError(null);
@@ -366,7 +487,7 @@ export default function AdminPanel({ socket, onLogout }) {
             <AdminStat icon={Building2} label="Áreas activas" value={activeAreas.length} />
             <AdminStat icon={Users} label="Analistas" value={analysts.length} tone="purple" />
             <AdminStat icon={Activity} label="Disponibles" value={availableAnalysts.length} tone="green" />
-            <AdminStat icon={AlertTriangle} label="Tickets sin asignar" value={unassignedQueueTickets.length} tone="amber" />
+            <AdminStat icon={Bot} label="Pasos del bot" value={botFlows.length} tone="amber" />
           </div>
         </section>
 
@@ -375,6 +496,105 @@ export default function AdminPanel({ socket, onLogout }) {
         <AdminAlert>
           La presencia se actualiza cada {ADMIN_REFRESH_INTERVAL_MS / 1000} segundos y cuando el socket se reconecta. Los cambios de asignación refrescan la cola en tiempo real.
         </AdminAlert>
+
+        <section className="admin-card admin-card--wide admin-flow-manager">
+          <div className="admin-section-heading">
+            <div>
+              <p className="admin-kicker">Gestor de flujos del bot</p>
+              <h3>Plantillas de mensajes de WhatsApp</h3>
+            </div>
+            <div className="admin-row-actions">
+              <span className="admin-pill admin-pill--muted">{flowCache.length} entradas en caché</span>
+              <button className="admin-soft-btn" onClick={invalidateFlowCache}><RefreshCw size={14} /> Invalidar caché</button>
+            </div>
+          </div>
+
+              <p className="admin-help-text">
+            Estos pasos son plantillas para momentos específicos que el bot de WhatsApp ya reconoce. Podés crear versiones globales o personalizadas por área; no es un editor visual de flujos todavía.
+          </p>
+
+          <div className="admin-flow-layout">
+            <form className="admin-form admin-flow-form" onSubmit={submitFlow}>
+              <div className="admin-form__row admin-form__row--thirds">
+                <label>
+                  <span>Versión</span>
+                  <input type="number" min="1" value={flowForm.version_id} onChange={e => setFlowForm(prev => ({ ...prev, version_id: e.target.value }))} />
+                </label>
+                <label>
+                  <span>Área</span>
+                  <select value={flowForm.area_id} onChange={e => setFlowForm(prev => ({ ...prev, area_id: e.target.value }))}>
+                    <option value="">Global</option>
+                    {areas.map(area => <option key={area.id} value={area.id}>{area.name}</option>)}
+                  </select>
+                </label>
+                <label>
+                  <span>Orden</span>
+                  <input type="number" value={flowForm.sort_order} onChange={e => setFlowForm(prev => ({ ...prev, sort_order: e.target.value }))} />
+                </label>
+              </div>
+              <label>
+                <span>Clave del paso</span>
+                <select value={flowForm.step_key} onChange={e => setFlowForm(prev => ({ ...prev, step_key: e.target.value }))}>
+                  <option value="">Seleccioná un momento del bot</option>
+                  {SUPPORTED_BOT_FLOW_STEPS.map(step => <option key={step.key} value={step.key}>{step.label} · {step.key}</option>)}
+                </select>
+              </label>
+              <label>
+                <span>Mensaje</span>
+                <textarea value={flowForm.message} onChange={e => setFlowForm(prev => ({ ...prev, message: e.target.value }))} rows={5} placeholder="Texto que enviará el bot. Podés usar variables como {{nombre}}." />
+              </label>
+              <label className="admin-check-row">
+                <input type="checkbox" checked={flowForm.active} onChange={e => setFlowForm(prev => ({ ...prev, active: e.target.checked }))} />
+                <span>Activo para el bot</span>
+              </label>
+              <div className="admin-row-actions">
+                <button className="admin-primary-btn" disabled={savingFlow || !flowForm.step_key.trim() || !flowForm.message.trim()}>
+                  <Save size={16} /> {savingFlow ? 'Guardando...' : flowForm.id ? 'Actualizar paso' : 'Crear paso'}
+                </button>
+                {flowForm.id && <button type="button" className="admin-soft-btn" onClick={resetFlowForm}>Nuevo paso</button>}
+              </div>
+            </form>
+
+            <div className="admin-table-wrap admin-flow-table-wrap">
+              <table className="admin-table admin-table--flows">
+                <thead>
+                  <tr>
+                    <th>Paso</th>
+                    <th>Versión</th>
+                    <th>Área</th>
+                    <th>Estado</th>
+                    <th>Acciones</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {botFlows.length === 0 && !loading ? (
+                    <tr><td colSpan="5" className="admin-empty">Aún no hay plantillas configuradas. El bot usará los mensajes estáticos de respaldo.</td></tr>
+                  ) : botFlows.map(flow => (
+                    <tr key={flow.id}>
+                      <td>
+                        <strong>{flow.step_key}</strong>
+                        <span className="admin-table-subtext admin-flow-message-preview">{flow.message}</span>
+                      </td>
+                      <td>v{flow.version_id}</td>
+                      <td>{flow.area?.name || (flow.area_id ? areaNameById.get(String(flow.area_id)) || `Área #${flow.area_id}` : 'Global')}</td>
+                      <td>
+                        <span className={`admin-pill ${flow.active === false ? 'admin-pill--muted' : 'admin-pill--green'}`}>
+                          {flow.active === false ? 'Inactivo' : 'Activo'}
+                        </span>
+                      </td>
+                      <td>
+                        <div className="admin-row-actions">
+                          <button className="admin-soft-btn" onClick={() => editFlow(flow)}>Editar</button>
+                          <button className="admin-soft-btn" onClick={() => toggleFlowActive(flow)}>{flow.active === false ? 'Activar' : 'Desactivar'}</button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
 
         <section className="admin-card admin-card--wide">
           <div className="admin-section-heading">

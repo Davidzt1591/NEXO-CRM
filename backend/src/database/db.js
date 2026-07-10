@@ -661,7 +661,7 @@ async function listActiveBotFlows({ areaId = null } = {}) {
 
   let query = supabase
     .from('bot_flows')
-    .select('*')
+    .select('*, area:areas(id, name)')
     .eq('active', true)
     .order('area_id', { ascending: true, nullsFirst: true })
     .order('sort_order', { ascending: true })
@@ -681,6 +681,74 @@ async function listActiveBotFlows({ areaId = null } = {}) {
     throw error;
   }
   return data || [];
+}
+
+async function listBotFlows({ versionId, areaId, globalOnly = false, active } = {}) {
+  let query = supabase
+    .from('bot_flows')
+    .select('*, area:areas(id, name)')
+    .order('version_id', { ascending: false })
+    .order('area_id', { ascending: true, nullsFirst: true })
+    .order('sort_order', { ascending: true })
+    .order('step_key', { ascending: true })
+    .order('id', { ascending: true });
+
+  if (versionId !== undefined && versionId !== null && versionId !== '') query = query.eq('version_id', Number(versionId));
+  if (globalOnly) query = query.is('area_id', null);
+  if (areaId !== undefined && areaId !== null && areaId !== '') query = query.eq('area_id', Number(areaId));
+  if (active !== undefined && active !== null && active !== '') query = query.eq('active', !!active);
+
+  const { data, error } = await query;
+  if (error) {
+    console.error('❌ Error Supabase al listar flujos del bot:', error.message);
+    throw error;
+  }
+  return data || [];
+}
+
+async function createBotFlowStep({ version_id, area_id, step_key, message, sort_order = 0, active = true }) {
+  const payload = {
+    version_id: Number(version_id),
+    area_id: area_id || null,
+    step_key,
+    message,
+    sort_order: Number.isFinite(Number(sort_order)) ? Number(sort_order) : 0,
+    active: active !== false,
+    updated_at: new Date().toISOString(),
+  };
+
+  const { data, error } = await supabase
+    .from('bot_flows')
+    .insert(payload)
+    .select()
+    .single();
+
+  if (error) {
+    console.error('❌ Error Supabase al crear paso de flujo del bot:', error.message);
+    throw error;
+  }
+  return data;
+}
+
+async function updateBotFlowStep(id, changes) {
+  const allowed = ['version_id', 'area_id', 'step_key', 'message', 'sort_order', 'active'];
+  const payload = { updated_at: new Date().toISOString() };
+  for (const key of allowed) {
+    if (Object.prototype.hasOwnProperty.call(changes, key)) payload[key] = changes[key];
+  }
+
+  const { data, error } = await supabase
+    .from('bot_flows')
+    .update(payload)
+    .eq('id', id)
+    .select()
+    .single();
+
+  if (error) {
+    console.error(`❌ Error Supabase al actualizar paso de flujo del bot #${id}:`, error.message);
+    throw error;
+  }
+  return data;
 }
 
 // Mock closing for Supabase (no active connections/intervals to clear like SQLite)
@@ -738,5 +806,8 @@ module.exports = {
   getAnalystByTokenId,
   logAudit,
   listAuditLogs,
-  listActiveBotFlows
+  listActiveBotFlows,
+  listBotFlows,
+  createBotFlowStep,
+  updateBotFlowStep
 };

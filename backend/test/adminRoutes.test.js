@@ -118,6 +118,9 @@ function createMockDb(overrides = {}) {
     updateTicketArea: async (ticketId, areaId) => ({ id: ticketId, area_id: areaId }),
     listAvailableAnalystsByArea: async areaId => [{ id: 7, area_id: areaId, display_name: 'Ada', available: true }],
     listActiveBotFlows: async () => [{ id: 1, step_key: 'initial_filter', version_id: 1, area_id: null }],
+    listBotFlows: async () => [{ id: 1, step_key: 'initial_filter', message: 'Hola', version_id: 1, area_id: null, active: true, sort_order: 0 }],
+    createBotFlowStep: async payload => ({ id: 4, ...payload }),
+    updateBotFlowStep: async (id, payload) => ({ id, step_key: 'ask_name', version_id: 1, area_id: null, message: 'Nombre', sort_order: 0, active: true, ...payload }),
     ...overrides,
   };
 }
@@ -398,6 +401,176 @@ test('/api/admin invalidates bot flow cache and writes audit log', async () => {
     assert.equal(audits[0].action, 'flow.cache_invalidated');
     assert.equal(audits[0].target_id, '3');
     assert.deepEqual(audits[0].metadata, { area_id: 3 });
+  });
+});
+
+test('/api/admin lists manageable bot flows with filters', async () => {
+  await withServer(createMockDb({
+    listBotFlows: async filters => {
+      assert.deepEqual(filters, { versionId: 2, areaId: 3, globalOnly: false, active: false });
+      return [{ id: 8, step_key: 'ask_issue', message: 'Describe', version_id: 2, area_id: 3, active: false }];
+    },
+  }), { role: 'admin', name: 'Admin' }, async (baseUrl) => {
+    const res = await request(baseUrl, 'GET', '/api/admin/bot-flows?version_id=2&area_id=3&active=false');
+
+    assert.equal(res.status, 200);
+    assert.equal(res.body.flows[0].id, 8);
+  });
+});
+
+test('/api/admin creates bot flow steps, invalidates cache, and writes audit logs', async () => {
+  const audits = [];
+  let createdPayload;
+
+  await withServer(createMockDb({
+    listBotFlows: async () => [],
+    createBotFlowStep: async payload => { createdPayload = payload; return { id: 9, ...payload }; },
+    logAudit: async payload => { audits.push(payload); return { id: 1 }; },
+  }), { role: 'admin', name: 'Root' }, async (baseUrl) => {
+    const res = await request(baseUrl, 'POST', '/api/admin/bot-flows', {
+      version_id: 2,
+      area_id: null,
+      step_key: 'ask_name',
+      message: 'Indica tu nombre',
+      sort_order: 10,
+      active: true,
+    });
+
+    assert.equal(res.status, 201);
+    assert.deepEqual(createdPayload, { version_id: 2, area_id: null, step_key: 'ask_name', message: 'Indica tu nombre', sort_order: 10, active: true });
+    assert.equal(audits[0].action, 'flow.created');
+    assert.equal(audits[0].target_id, '9');
+    assert.deepEqual(res.body.cache, undefined);
+  });
+});
+
+test('/api/admin rejects bot flow creation with missing required fields', async () => {
+  let createCalled = false;
+  await withServer(createMockDb({
+    createBotFlowStep: async payload => { createCalled = true; return { id: 1, ...payload }; },
+  }), { role: 'admin', name: 'Admin' }, async (baseUrl) => {
+    const res = await request(baseUrl, 'POST', '/api/admin/bot-flows', { version_id: 1, step_key: 'ask_name' });
+
+    assert.equal(res.status, 400);
+    assert.deepEqual(res.body, { error: 'message is required.' });
+    assert.equal(createCalled, false);
+  });
+});
+
+test('/api/admin rejects duplicate bot flow steps before insert', async () => {
+  let createCalled = false;
+  await withServer(createMockDb({
+    listBotFlows: async () => [{ id: 1, version_id: 1, area_id: null, step_key: 'ask_name' }],
+    createBotFlowStep: async payload => { createCalled = true; return { id: 2, ...payload }; },
+  }), { role: 'admin', name: 'Admin' }, async (baseUrl) => {
+    const res = await request(baseUrl, 'POST', '/api/admin/bot-flows', { version_id: 1, step_key: 'ask_name', message: 'Nombre' });
+
+    assert.equal(res.status, 409);
+    assert.match(res.body.error, /already exists/);
+    assert.equal(createCalled, false);
+  });
+});
+
+test('/api/admin translates DB bot flow unique violations to 409', async () => {
+  await withServer(createMockDb({
+    listBotFlows: async () => [],
+    createBotFlowStep: async () => {
+      const err = new Error('duplicate key value violates unique constraint "bot_flows_effective_identity_uidx"');
+      err.code = '23505';
+      throw err;
+    },
+  }), { role: 'admin', name: 'Admin' }, async (baseUrl) => {
+    const res = await request(baseUrl, 'POST', '/api/admin/bot-flows', { version_id: 1, step_key: 'ask_name', message: 'Nombre' });
+
+    assert.equal(res.status, 409);
+    assert.match(res.body.error, /already exists/);
+  });
+});
+
+test('/api/admin rejects unsupported bot flow step keys', async () => {
+  let createCalled = false;
+  await withServer(createMockDb({
+    createBotFlowStep: async payload => { createCalled = true; return { id: 2, ...payload }; },
+  }), { role: 'admin', name: 'Admin' }, async (baseUrl) => {
+    const res = await request(baseUrl, 'POST', '/api/admin/bot-flows', { version_id: 1, step_key: 'custom_future_step', message: 'No usado' });
+
+    assert.equal(res.status, 400);
+    assert.match(res.body.error, /Unsupported step_key/);
+    assert.equal(createCalled, false);
+  });
+});
+
+test('/api/admin create bot flow invalidates populated route cache', async () => {
+  await withServer(createMockDb({
+    listActiveBotFlows: async () => [{ id: 1, step_key: 'ask_name', message: 'Nombre cacheado', version_id: 1, area_id: null }],
+    listBotFlows: async () => [],
+  }), { role: 'admin', name: 'Admin' }, async (baseUrl) => {
+    const loadedBotFlow = require(botFlowPath);
+    await loadedBotFlow.loadFlow();
+    assert.equal(loadedBotFlow.getBotFlowCacheStatus().length, 1);
+
+    const res = await request(baseUrl, 'POST', '/api/admin/bot-flows', { version_id: 1, step_key: 'ask_email', message: 'Correo' });
+
+    assert.equal(res.status, 201);
+    assert.deepEqual(loadedBotFlow.getBotFlowCacheStatus(), []);
+  });
+});
+
+test('/api/admin updates bot flow steps and guards duplicates', async () => {
+  const audits = [];
+  let updateCalled = false;
+  await withServer(createMockDb({
+    listBotFlows: async () => [
+      { id: 1, version_id: 1, area_id: null, step_key: 'ask_name', message: 'Nombre' },
+      { id: 2, version_id: 1, area_id: null, step_key: 'ask_email', message: 'Correo' },
+    ],
+    updateBotFlowStep: async (id, payload) => { updateCalled = true; return { id, version_id: 1, area_id: null, step_key: 'ask_name', message: 'Nombre completo', active: true, ...payload }; },
+    logAudit: async payload => { audits.push(payload); return { id: 1 }; },
+  }), { role: 'admin', name: 'Root' }, async (baseUrl) => {
+    const duplicate = await request(baseUrl, 'PATCH', '/api/admin/bot-flows/1', { step_key: 'ask_email' });
+    assert.equal(duplicate.status, 409);
+    assert.equal(updateCalled, false);
+
+    const updated = await request(baseUrl, 'PATCH', '/api/admin/bot-flows/1', { message: 'Nombre completo' });
+    assert.equal(updated.status, 200);
+    assert.equal(updated.body.message, 'Nombre completo');
+    assert.equal(audits[0].action, 'flow.updated');
+  });
+});
+
+test('/api/admin update and toggle bot flow routes invalidate populated cache', async () => {
+  await withServer(createMockDb({
+    listActiveBotFlows: async () => [{ id: 1, step_key: 'ask_name', message: 'Nombre cacheado', version_id: 1, area_id: null }],
+    listBotFlows: async () => [{ id: 1, version_id: 1, area_id: null, step_key: 'ask_name', message: 'Nombre' }],
+  }), { role: 'admin', name: 'Admin' }, async (baseUrl) => {
+    const loadedBotFlow = require(botFlowPath);
+
+    await loadedBotFlow.loadFlow();
+    assert.equal(loadedBotFlow.getBotFlowCacheStatus().length, 1);
+    const updated = await request(baseUrl, 'PATCH', '/api/admin/bot-flows/1', { message: 'Nombre completo' });
+    assert.equal(updated.status, 200);
+    assert.deepEqual(loadedBotFlow.getBotFlowCacheStatus(), []);
+
+    await loadedBotFlow.loadFlow();
+    assert.equal(loadedBotFlow.getBotFlowCacheStatus().length, 1);
+    const toggled = await request(baseUrl, 'POST', '/api/admin/bot-flows/1/toggle', { active: false });
+    assert.equal(toggled.status, 200);
+    assert.deepEqual(loadedBotFlow.getBotFlowCacheStatus(), []);
+  });
+});
+
+test('/api/admin toggles bot flow active state and writes audit logs', async () => {
+  const audits = [];
+  await withServer(createMockDb({
+    updateBotFlowStep: async (id, payload) => ({ id, step_key: 'ask_name', version_id: 1, area_id: null, message: 'Nombre', active: payload.active }),
+    logAudit: async payload => { audits.push(payload); return { id: 1 }; },
+  }), { role: 'admin', name: 'Root' }, async (baseUrl) => {
+    const res = await request(baseUrl, 'POST', '/api/admin/bot-flows/1/toggle', { active: false });
+
+    assert.equal(res.status, 200);
+    assert.equal(res.body.active, false);
+    assert.equal(audits[0].action, 'flow.toggled');
+    assert.deepEqual(audits[0].metadata, { active: false });
   });
 });
 

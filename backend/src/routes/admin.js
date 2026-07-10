@@ -15,6 +15,23 @@ const asyncHandler = fn => (req, res) =>
     res.status(e.statusCode || 500).json({ error: e.message });
   });
 
+function isUniqueViolation(error) {
+  return error?.code === '23505' || /duplicate key value|unique constraint|unique violation/i.test(error?.message || '');
+}
+
+async function mapBotFlowWriteConflict(operation) {
+  try {
+    return await operation();
+  } catch (err) {
+    if (isUniqueViolation(err)) {
+      const conflict = new Error('A bot flow step already exists for this version, area, and step key.');
+      conflict.statusCode = 409;
+      throw conflict;
+    }
+    throw err;
+  }
+}
+
 function requireText(value, field) {
   if (!value || typeof value !== 'string' || !value.trim()) {
     const err = new Error(`${field} is required.`);
@@ -47,6 +64,94 @@ function optionalAreaId(value, field) {
     throw err;
   }
   return Number(value);
+}
+
+function optionalPositiveInteger(value, field) {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (!Number.isInteger(Number(value)) || Number(value) <= 0 || String(value).trim() !== String(Number(value))) {
+    const err = new Error(`${field} must be a positive integer.`);
+    err.statusCode = 400;
+    throw err;
+  }
+  return Number(value);
+}
+
+function requiredPositiveInteger(value, field) {
+  const normalized = optionalPositiveInteger(value, field);
+  if (normalized === undefined) {
+    const err = new Error(`${field} is required.`);
+    err.statusCode = 400;
+    throw err;
+  }
+  return normalized;
+}
+
+function optionalInteger(value, field) {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (!Number.isInteger(Number(value)) || String(value).trim() !== String(Number(value))) {
+    const err = new Error(`${field} must be an integer.`);
+    err.statusCode = 400;
+    throw err;
+  }
+  return Number(value);
+}
+
+function optionalBoolean(value, field) {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value === 'boolean') return value;
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  const err = new Error(`${field} must be true or false.`);
+  err.statusCode = 400;
+  throw err;
+}
+
+function normalizeBotFlowPayload(body, { partial = false } = {}) {
+  const payload = {};
+
+  if (!partial || Object.prototype.hasOwnProperty.call(body, 'version_id')) {
+    payload.version_id = requiredPositiveInteger(body?.version_id, 'version_id');
+  }
+  if (!partial || Object.prototype.hasOwnProperty.call(body, 'step_key')) {
+    payload.step_key = requireText(body?.step_key, 'step_key');
+    if (!botFlow.SUPPORTED_STEP_KEYS.includes(payload.step_key)) {
+      const err = new Error(`Unsupported step_key. Supported values: ${botFlow.SUPPORTED_STEP_KEYS.join(', ')}.`);
+      err.statusCode = 400;
+      throw err;
+    }
+  }
+  if (!partial || Object.prototype.hasOwnProperty.call(body, 'message')) {
+    payload.message = requireText(body?.message, 'message');
+  }
+  if (Object.prototype.hasOwnProperty.call(body || {}, 'area_id')) payload.area_id = optionalAreaId(body.area_id, 'area_id');
+  if (Object.prototype.hasOwnProperty.call(body || {}, 'sort_order')) payload.sort_order = optionalInteger(body.sort_order, 'sort_order') ?? 0;
+  if (Object.prototype.hasOwnProperty.call(body || {}, 'active')) payload.active = optionalBoolean(body.active, 'active');
+
+  return payload;
+}
+
+async function assertUniqueBotFlowStep(payload, currentId = null) {
+  const versionId = payload.version_id;
+  const stepKey = payload.step_key;
+  if (!versionId || !stepKey) return;
+
+  const existing = await db.listBotFlows({
+    versionId,
+    areaId: payload.area_id || undefined,
+    globalOnly: payload.area_id === null,
+  });
+  const duplicate = existing.find(row => (
+    String(row.step_key) === stepKey &&
+    String(row.version_id) === String(versionId) &&
+    String(row.area_id || '') === String(payload.area_id || '') &&
+    String(row.id) !== String(currentId || '')
+  ));
+
+  if (duplicate) {
+    const err = new Error('A bot flow step already exists for this version, area, and step key.');
+    err.statusCode = 409;
+    throw err;
+  }
 }
 
 async function audit(req, action, targetId, metadata) {
@@ -174,9 +279,62 @@ router.post('/tickets/:id/transfer', asyncHandler(async (req, res) => {
 
 // ── Bot flows ───────────────────────────────────────────────────────────────
 router.get('/bot-flows', asyncHandler(async (req, res) => {
+  const versionId = optionalPositiveInteger(req.query.version_id, 'version_id');
   const areaId = optionalAreaId(req.query.area_id, 'area_id');
-  const flows = await db.listActiveBotFlows({ areaId });
+  const globalOnly = req.query.scope === 'global' || req.query.global === 'true';
+  const active = req.query.active === 'all' ? undefined : optionalBoolean(req.query.active ?? true, 'active');
+  const flows = req.query.version_id || req.query.active || globalOnly
+    ? await db.listBotFlows({ versionId, areaId, globalOnly, active })
+    : await db.listActiveBotFlows({ areaId });
   res.json({ flows, cache: botFlow.getBotFlowCacheStatus() });
+}));
+
+router.post('/bot-flows', asyncHandler(async (req, res) => {
+  const payload = normalizeBotFlowPayload(req.body);
+  await assertUniqueBotFlowStep(payload);
+
+  const flow = await mapBotFlowWriteConflict(() => db.createBotFlowStep(payload));
+  botFlow.invalidateBotFlowCache();
+  await audit(req, 'flow.created', flow.id, {
+    version_id: flow.version_id,
+    area_id: flow.area_id || null,
+    step_key: flow.step_key,
+  });
+  res.status(201).json(flow);
+}));
+
+router.patch('/bot-flows/:id', asyncHandler(async (req, res) => {
+  requirePatchBody(req.body, ['version_id', 'area_id', 'step_key', 'message', 'sort_order', 'active']);
+  const current = await db.listBotFlows({ active: undefined });
+  const existing = current.find(row => String(row.id) === String(req.params.id));
+  if (!existing) {
+    const err = new Error('Bot flow step not found.');
+    err.statusCode = 404;
+    throw err;
+  }
+
+  const changes = normalizeBotFlowPayload(req.body, { partial: true });
+  const next = { ...existing, ...changes };
+  await assertUniqueBotFlowStep(next, req.params.id);
+
+  const flow = await mapBotFlowWriteConflict(() => db.updateBotFlowStep(req.params.id, changes));
+  botFlow.invalidateBotFlowCache();
+  await audit(req, 'flow.updated', flow.id, changes);
+  res.json(flow);
+}));
+
+router.post('/bot-flows/:id/toggle', asyncHandler(async (req, res) => {
+  const active = optionalBoolean(req.body?.active, 'active');
+  if (active === undefined) {
+    const err = new Error('active is required.');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const flow = await db.updateBotFlowStep(req.params.id, { active });
+  botFlow.invalidateBotFlowCache();
+  await audit(req, 'flow.toggled', flow.id, { active: flow.active });
+  res.json(flow);
 }));
 
 router.post('/bot-flows/cache/invalidate', asyncHandler(async (req, res) => {
