@@ -32,7 +32,7 @@ function useDebounce(value, delay) {
 }
 
 // ── Account Lookup Component (Typeahead) ──────────────────────────────────────
-function AccountLookup({ initialAccount, onSelect }) {
+function AccountLookup({ initialAccount, ticketId, onSelect }) {
   const [query, setQuery]             = useState(initialAccount?.name || '');
   const [results, setResults]         = useState([]);
   const [searching, setSearching]     = useState(false);
@@ -54,19 +54,20 @@ function AccountLookup({ initialAccount, onSelect }) {
 
   // Fetch suggestions
   useEffect(() => {
-    if (selected || debouncedQuery.length < 3) {
+    if (!ticketId || selected || debouncedQuery.length < 3) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setResults([]);
       setShowDropdown(false);
       return;
     }
     setSearching(true);
-    fetch(`${API}/accounts?q=${encodeURIComponent(debouncedQuery)}`)
+    const params = new URLSearchParams({ q: debouncedQuery, ticket_id: ticketId });
+    fetch(`${API}/accounts?${params.toString()}`)
       .then(r => r.json())
       .then(data => { setResults(data); setShowDropdown(true); })
       .catch(() => setResults([]))
       .finally(() => setSearching(false));
-  }, [debouncedQuery, selected]);
+  }, [debouncedQuery, selected, ticketId]);
 
   const handleSelect = (acc) => {
     setSelected(acc);
@@ -153,6 +154,7 @@ export default function SalesforceCaseModal({ ticket, onClose, onCaseCreated }) 
   const [successMsg, setSuccessMsg]       = useState(null);
 
   const isEditMode = !!caseId;
+  const ticketId = ticket?.id || ticket?.ticket_id || null;
 
   // ── Load picklists + owner identity + existing case data ─────────────────
   useEffect(() => {
@@ -164,7 +166,8 @@ export default function SalesforceCaseModal({ ticket, onClose, onCaseCreated }) 
 
     // Si hay caseId, obtener datos existentes del Case
     if (caseId) {
-      promises.push(fetch(`${API}/cases/${caseId}`).then(r => r.json()));
+      const params = new URLSearchParams({ ticket_id: ticketId });
+      promises.push(fetch(`${API}/cases/${caseId}?${params.toString()}`).then(r => r.json()));
     }
 
     Promise.all(promises)
@@ -196,7 +199,7 @@ export default function SalesforceCaseModal({ ticket, onClose, onCaseCreated }) 
       })
       .catch(e => setError('Error al conectar con Salesforce: ' + e.message))
       .finally(() => setLoadingMeta(false));
-  }, [caseId]);
+  }, [caseId, ticketId]);
 
   // ── Helper: get filtered options for a field (respects dependencies) ────
   const getFilteredOptions = (fieldApi) => {
@@ -269,7 +272,7 @@ export default function SalesforceCaseModal({ ticket, onClose, onCaseCreated }) 
     // Clean empty strings
     Object.keys(fields).forEach(k => { if (!fields[k]) delete fields[k]; });
 
-    return { ...base, ...fields };
+    return { ...base, ...fields, ticket_id: ticketId };
   };
 
   // ── Save (Create or Update) ───────────────────────────────────────────────
@@ -361,7 +364,7 @@ export default function SalesforceCaseModal({ ticket, onClose, onCaseCreated }) 
       await fetch(`${API}/cases/${caseId}/close`, {
         method  : 'POST',
         headers : { 'Content-Type': 'application/json' },
-        body    : JSON.stringify({ resolucion, subetapa_resuelto: closeSubetapa }),
+        body    : JSON.stringify({ ticket_id: ticketId, resolucion, subetapa_resuelto: closeSubetapa }),
       }).then(async r => {
         const j = await r.json();
         if (!r.ok) throw new Error(j.error || r.statusText);
@@ -393,7 +396,7 @@ export default function SalesforceCaseModal({ ticket, onClose, onCaseCreated }) 
     setError(null);
     setIsSaving(true);
     try {
-      const payload = { Status: newStatus };
+      const payload = { ticket_id: ticketId, Status: newStatus };
       if (newStatus === 'En espera' && waitSubetapa) {
         payload.subetapa_en_espera__c = waitSubetapa;
       }
@@ -421,7 +424,11 @@ export default function SalesforceCaseModal({ ticket, onClose, onCaseCreated }) 
     setIsAssigning(true);
     setError(null);
     try {
-      await fetch(`${API}/cases/${caseId}/assign-me`, { method: 'PATCH' })
+      await fetch(`${API}/cases/${caseId}/assign-me`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ticket_id: ticketId }),
+      })
         .then(async r => { const j = await r.json(); if (!r.ok) throw new Error(j.error); });
       setAssignedToMe(true);
       setSuccessMsg(`👤 Caso asignado a ${ownerInfo?.displayName || 'ti'}.`);
@@ -504,6 +511,7 @@ export default function SalesforceCaseModal({ ticket, onClose, onCaseCreated }) 
                 <h3 className="sf-section__title">🏢 Cuenta Asociada</h3>
                 <AccountLookup
                   initialAccount={accountSelected}
+                  ticketId={ticketId}
                   onSelect={acc => setAccountSelected(acc)}
                 />
               </div>

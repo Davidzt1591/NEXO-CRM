@@ -3,6 +3,9 @@ const db    = require('./database/db');
 const whatsappAdapter = require('./services/whatsapp');
 const { canAccessTicket, filterTicketsForPrincipal, isAdmin, emitOperational } = require('./realtime/operational');
 const routing = require('./services/routing');
+const { validateWhatsAppMedia } = require('./services/mediaValidation');
+const { uploadWhatsAppMediaForTicket } = require('./services/salesforceMedia');
+const ticketClose = require('./services/ticketClose');
 
 async function resolveTicketArea(ticketId) {
   if (!ticketId) return null;
@@ -275,8 +278,20 @@ function setupSockets(io, client, borrarSesion) {
         if (authorizedTicket === false || (ticketId && !authorizedTicket)) return;
 
         let sent;
+        let mediaMetadata = null;
+        let mediaUpload = null;
         if (media?.data) {
-          sent = await whatsappAdapter.sendMessage(chatId, safeMessage, { media });
+          const validated = validateWhatsAppMedia(media);
+          mediaMetadata = { filename: validated.filename, mimetype: validated.mimetype, sizeBytes: validated.sizeBytes };
+          sent = await whatsappAdapter.sendMessage(chatId, safeMessage, { media: { ...media, data: validated.data, mimetype: validated.mimetype, filename: validated.filename } });
+          if (ticketId) {
+            try {
+              mediaUpload = await uploadWhatsAppMediaForTicket({ ticketId, media: { ...media, data: validated.data, mimetype: validated.mimetype, filename: validated.filename } });
+            } catch (err) {
+              console.warn('⚠️  No se pudo subir adjunto saliente a Salesforce:', err.message);
+              mediaUpload = { uploaded: false, reason: 'upload_failed', metadata: mediaMetadata };
+            }
+          }
         } else {
           sent = await whatsappAdapter.sendMessage(chatId, safeMessage);
         }
@@ -293,7 +308,8 @@ function setupSockets(io, client, borrarSesion) {
           chatId,
           ticketId:    ticketId || null,
           message:     displayBody,
-          media:       media || null,
+          media:       mediaMetadata,
+          mediaUpload,
           waMessageId,
           from_user:   false,
           is_bot:      false,
@@ -399,29 +415,17 @@ function setupSockets(io, client, borrarSesion) {
     socket.on('close-ticket', async (ticketId) => {
       const ticketData = await requireAuthorizedTicket(socket, ticketId);
       if (!ticketData) return;
-      await db.closeTicket(ticketId);
+      const result = await ticketClose.closeTicket({ ticketId, actor: socket.user, sendFarewell: true, whatsappClient: client });
 
-      if (ticketData?.telefono) {
-        const despedida =
-          'Estimado usuario, su solicitud ha sido *atendida y el ticket cerrado exitosamente*. ✅\n\n' +
-          'Ha sido un gusto poder ayudarle. Si en algún momento tiene un nuevo requerimiento, ' +
-          'no dude en contactarnos nuevamente.\n\n' +
-          '¡Hasta pronto! 👋 — *Equipo de Integraciones Magneto365*';
-        try {
-          await client.sendMessage(ticketData.telefono, despedida);
-          const timestamp = new Date().toISOString();
-          await db.saveMessage({ ticket_id: ticketId, chat_id: ticketData.telefono, body: despedida, from_user: false, is_bot: true });
-          emitOperational(io, 'new-message', {
-            chatId:    ticketData.telefono,
-            ticketId,
-            message:   despedida,
-            from_user: false,
-            is_bot:    true,
-            timestamp,
-          }, ticketData?.area_id || null);
-        } catch (e) {
-          console.warn('⚠️  Error enviando mensaje de cierre:', e.message);
-        }
+      if (result.farewellSent && ticketData?.telefono) {
+        emitOperational(io, 'new-message', {
+          chatId:    ticketData.telefono,
+          ticketId,
+          message:   ticketClose.DEFAULT_FAREWELL,
+          from_user: false,
+          is_bot:    true,
+          timestamp: new Date().toISOString(),
+        }, ticketData?.area_id || null);
       }
 
       emitOperational(io, 'ticket-closed', { ticketId }, ticketData?.area_id || null);

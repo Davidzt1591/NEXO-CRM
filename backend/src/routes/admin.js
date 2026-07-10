@@ -227,8 +227,22 @@ router.patch('/analysts/:id', asyncHandler(async (req, res) => {
 
 // ── Audit ───────────────────────────────────────────────────────────────────
 router.get('/audit', asyncHandler(async (req, res) => {
-  const logs = await db.listAuditLogs(req.query.limit);
+  const logs = await db.listAuditLogs({
+    limit: req.query.limit,
+    offset: req.query.offset,
+    action: req.query.action,
+    actor_role: req.query.actor_role,
+    target_id: req.query.target_id,
+    from: req.query.from,
+    to: req.query.to,
+  });
   res.json(logs);
+}));
+
+// ── Reports ─────────────────────────────────────────────────────────────────
+router.get('/reports/summary', asyncHandler(async (req, res) => {
+  const summary = await db.getAdminReportSummary();
+  res.json(summary);
 }));
 
 // ── Routing / Queue ────────────────────────────────────────────────────────

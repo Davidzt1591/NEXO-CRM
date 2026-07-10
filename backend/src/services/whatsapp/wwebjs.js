@@ -8,6 +8,8 @@ const { crearCase }         = require('../salesforce');
 const botFlow               = require('../botFlow');
 const { emitOperational }   = require('../../realtime/operational');
 const routing               = require('../routing');
+const { validateWhatsAppMedia } = require('../mediaValidation');
+const { uploadWhatsAppMediaForTicket } = require('../salesforceMedia');
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -152,14 +154,16 @@ function createWhatsAppMessageHandler(io, client, options = {}) {
       try {
         const media = await message.downloadMedia();
         if (media) {
-          mediaPayload = {
+          const candidate = {
             data:     media.data,
             mimetype: media.mimetype,
             filename: media.filename || '',
           };
+          const validated = validateWhatsAppMedia(candidate);
+          mediaPayload = { ...candidate, metadata: { filename: validated.filename, mimetype: validated.mimetype, sizeBytes: validated.sizeBytes } };
         }
       } catch (e) {
-        console.warn('⚠️  Media download error:', e.message);
+        console.warn('⚠️  Media download/validation error:', e.message);
       }
     }
 
@@ -182,12 +186,23 @@ function createWhatsAppMessageHandler(io, client, options = {}) {
       savedId = saved?.id;
     }
 
+    let mediaUpload = null;
+    if (mediaPayload?.data && sesion?.ticketId) {
+      try {
+        mediaUpload = await uploadWhatsAppMediaForTicket({ ticketId: sesion.ticketId, media: mediaPayload });
+      } catch (err) {
+        console.warn('⚠️  No se pudo subir adjunto WhatsApp a Salesforce:', err.message);
+        mediaUpload = { uploaded: false, reason: 'upload_failed', metadata: mediaPayload.metadata };
+      }
+    }
+
     const areaId = await resolveTicketArea(sesion?.ticketId || null);
     emitOperational(io, 'new-message', {
       chatId,
       ticketId:    sesion?.ticketId || null,
       message:     displayBody,
-      media:       mediaPayload,
+      media:       mediaPayload?.metadata || null,
+      mediaUpload,
       waMessageId: message.id._serialized,
       from_user:   true,
       is_bot:      false,

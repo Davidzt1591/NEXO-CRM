@@ -61,21 +61,52 @@ async function createTicket({ chat_id, telefono, nombre_analista, nombre_empresa
 }
 
 async function updateTicketSalesforce(id, { sf_case_id, sf_case_number }) {
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from('tickets')
     .update({ sf_case_id, sf_case_number })
-    .eq('id', id);
+    .eq('id', id)
+    .select('id,sf_case_id,sf_case_number')
+    .single();
 
-  if (error) console.error('❌ Error Supabase al actualizar Salesforce Case:', error.message);
+  if (error) {
+    console.error('❌ Error Supabase al actualizar Salesforce Case:', error.message);
+    throw error;
+  }
+
+  if (
+    !data ||
+    String(data.sf_case_id) !== String(sf_case_id) ||
+    String(data.sf_case_number) !== String(sf_case_number)
+  ) {
+    const err = new Error(`Ticket #${id} Salesforce Case binding was not confirmed by Supabase.`);
+    console.error('❌ Error Supabase al confirmar Salesforce Case:', err.message);
+    throw err;
+  }
+
+  return data;
 }
 
 async function closeTicket(id) {
-  const { error } = await supabase
+  const closedAt = new Date().toISOString();
+  const { data, error } = await supabase
     .from('tickets')
-    .update({ status: 'closed', closed_at: new Date().toISOString() })
-    .eq('id', id);
+    .update({ status: 'closed', closed_at: closedAt })
+    .eq('id', id)
+    .select()
+    .single();
 
-  if (error) console.error('❌ Error Supabase al cerrar ticket:', error.message);
+  if (error) {
+    console.error('❌ Error Supabase al cerrar ticket:', error.message);
+    throw error;
+  }
+
+  if (!data || data.status !== 'closed') {
+    const err = new Error(`Ticket #${id} close was not confirmed by Supabase.`);
+    console.error('❌ Error Supabase al confirmar cierre de ticket:', err.message);
+    throw err;
+  }
+
+  return data;
 }
 
 async function getTickets() {
@@ -271,6 +302,45 @@ async function getMessages(ticketId) {
   if (error) {
     console.error('❌ Error Supabase al obtener mensajes:', error.message);
     return [];
+  }
+  return data || [];
+}
+
+async function getTranscriptMessages(ticketId) {
+  return getMessages(ticketId);
+}
+
+async function createSalesforceAttachment({ ticket_id, sf_content_document_id, filename, mimetype, size_bytes }) {
+  const { data, error } = await supabase
+    .from('sf_attachments')
+    .insert({
+      ticket_id,
+      sf_content_document_id,
+      filename: filename || null,
+      mimetype: mimetype || null,
+      size_bytes: Number.isFinite(Number(size_bytes)) ? Number(size_bytes) : null,
+    })
+    .select()
+    .single();
+
+  if (error) {
+    console.error('❌ Error Supabase al registrar adjunto SF:', error.message);
+    throw error;
+  }
+  return data;
+}
+
+async function listSalesforceAttachments(ticketId) {
+  let query = supabase
+    .from('sf_attachments')
+    .select('*')
+    .order('created_at', { ascending: false });
+  if (ticketId) query = query.eq('ticket_id', ticketId);
+
+  const { data, error } = await query;
+  if (error) {
+    console.error('❌ Error Supabase al listar adjuntos SF:', error.message);
+    throw error;
   }
   return data || [];
 }
@@ -636,19 +706,66 @@ async function logAudit({ actor_name, actor_role, action, target_id, metadata })
   return data;
 }
 
-async function listAuditLogs(limit = 100) {
-  const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 500);
-  const { data, error } = await supabase
+async function listAuditLogs(options = 100) {
+  const filters = typeof options === 'object' && options !== null ? options : { limit: options };
+  const safeLimit = Math.min(Math.max(Number(filters.limit) || 100, 1), 500);
+  const safeOffset = Math.max(Number(filters.offset) || 0, 0);
+  let query = supabase
     .from('audit_log')
     .select('*')
-    .order('created_at', { ascending: false })
-    .limit(safeLimit);
+    .order('created_at', { ascending: false });
+
+  if (filters.action) query = query.eq('action', filters.action);
+  if (filters.actor_role) query = query.eq('actor_role', filters.actor_role);
+  if (filters.target_id) query = query.eq('target_id', String(filters.target_id));
+  if (filters.from) query = query.gte('created_at', filters.from);
+  if (filters.to) query = query.lte('created_at', filters.to);
+  query = query.range(safeOffset, safeOffset + safeLimit - 1);
+
+  const { data, error } = await query;
 
   if (error) {
     console.error('❌ Error Supabase al listar auditoría:', error.message);
     throw error;
   }
   return data || [];
+}
+
+async function getAdminReportSummary() {
+  const [tickets, attachments] = await Promise.all([
+    getTicketsWithRouting(),
+    listSalesforceAttachments().catch(() => []),
+  ]);
+
+  const byArea = new Map();
+  let closedWithDuration = 0;
+  let totalCloseMinutes = 0;
+
+  for (const ticket of tickets) {
+    const areaName = ticket.area?.name || 'Sin área';
+    const item = byArea.get(areaName) || { area: areaName, total: 0, open: 0, closed: 0 };
+    item.total += 1;
+    if (ticket.status === 'closed') item.closed += 1;
+    else item.open += 1;
+    byArea.set(areaName, item);
+
+    if (ticket.created_at && ticket.closed_at) {
+      const minutes = (new Date(ticket.closed_at).getTime() - new Date(ticket.created_at).getTime()) / 60000;
+      if (Number.isFinite(minutes) && minutes >= 0) {
+        closedWithDuration += 1;
+        totalCloseMinutes += minutes;
+      }
+    }
+  }
+
+  return {
+    total_tickets: tickets.length,
+    open_tickets: tickets.filter(ticket => ticket.status !== 'closed').length,
+    closed_tickets: tickets.filter(ticket => ticket.status === 'closed').length,
+    sf_attachments: attachments.length,
+    avg_close_minutes: closedWithDuration ? Math.round(totalCloseMinutes / closedWithDuration) : null,
+    by_area: Array.from(byArea.values()),
+  };
 }
 
 async function listActiveBotFlows({ areaId = null } = {}) {
@@ -778,6 +895,9 @@ module.exports = {
   // Messages
   saveMessage,
   getMessages,
+  getTranscriptMessages,
+  createSalesforceAttachment,
+  listSalesforceAttachments,
   // Sessions
   getSession,
   saveSession,
@@ -806,6 +926,7 @@ module.exports = {
   getAnalystByTokenId,
   logAudit,
   listAuditLogs,
+  getAdminReportSummary,
   listActiveBotFlows,
   listBotFlows,
   createBotFlowStep,

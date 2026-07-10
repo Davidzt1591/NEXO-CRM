@@ -107,6 +107,7 @@ function createMockDb(overrides = {}) {
     createAnalyst: async payload => ({ id: 3, ...payload }),
     updateAnalyst: async (id, payload) => ({ id, ...payload }),
     listAuditLogs: async () => [],
+    getAdminReportSummary: async () => ({ total_tickets: 0, open_tickets: 0, closed_tickets: 0, sf_attachments: 0, avg_close_minutes: null, by_area: [] }),
     logAudit: async () => ({ id: 1 }),
     getTicketsWithRouting: async () => [],
     getTicketById: async id => ({ id, area_id: 2, status: 'open', created_at: '2026-07-09T10:00:00.000Z' }),
@@ -235,15 +236,28 @@ test('/api/admin updates analysts and writes audit logs', async () => {
 });
 
 test('/api/admin allows admins to list audit logs', async () => {
-  let receivedLimit;
+  let receivedFilters;
   const logs = [{ id: 1, action: 'analyst.created', actor_name: 'Admin' }];
   await withServer(createMockDb({
-    listAuditLogs: async limit => { receivedLimit = limit; return logs; },
+    listAuditLogs: async filters => { receivedFilters = filters; return logs; },
   }), { role: 'admin', name: 'Admin' }, async (baseUrl) => {
-    const res = await request(baseUrl, 'GET', '/api/admin/audit?limit=25');
+    const res = await request(baseUrl, 'GET', '/api/admin/audit?limit=25&action=ticket.closed&offset=10');
     assert.equal(res.status, 200);
     assert.deepEqual(res.body, logs);
-    assert.equal(receivedLimit, '25');
+    assert.equal(receivedFilters.limit, '25');
+    assert.equal(receivedFilters.action, 'ticket.closed');
+    assert.equal(receivedFilters.offset, '10');
+  });
+});
+
+test('/api/admin reports summary returns aggregate payload', async () => {
+  const summary = { total_tickets: 2, open_tickets: 1, closed_tickets: 1, sf_attachments: 3, avg_close_minutes: 12, by_area: [{ area: 'Support', total: 2, open: 1, closed: 1 }] };
+  await withServer(createMockDb({
+    getAdminReportSummary: async () => summary,
+  }), { role: 'admin', name: 'Admin' }, async (baseUrl) => {
+    const res = await request(baseUrl, 'GET', '/api/admin/reports/summary');
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body, summary);
   });
 });
 

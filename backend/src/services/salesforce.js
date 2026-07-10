@@ -28,6 +28,7 @@ let describeCache = {
 const jwt = require('jsonwebtoken');
 const fs = require('fs');
 const path = require('path');
+const { ALLOWED_MIMETYPES, hasMagicBytes, normalizeBase64, sanitizeFilename } = require('./mediaValidation');
 
 const DEFAULT_PRIVATE_KEY_PATH = path.resolve(__dirname, '..', '..', 'certs', 'salesforce.key');
 
@@ -419,6 +420,74 @@ async function cerrarCase(id, resolucion, subetapaResuelto) {
   return { success: true };
 }
 
+// ── Case Files / Internal Comments ───────────────────────────────────────────
+
+function normalizeBase64Data(data, mimetype) {
+  if (Buffer.isBuffer(data)) {
+    if (!hasMagicBytes(data, mimetype)) throw new Error(`El contenido del archivo no coincide con el tipo declarado: ${mimetype}.`);
+    return data.toString('base64');
+  }
+  if (typeof data !== 'string') throw new Error('El archivo debe recibirse como base64 o Buffer.');
+  const normalized = normalizeBase64(data, mimetype);
+  if (!hasMagicBytes(normalized.buffer, mimetype)) throw new Error(`El contenido del archivo no coincide con el tipo declarado: ${mimetype}.`);
+  return normalized.data;
+}
+
+async function uploadFileToCase(caseId, { data, filename, mimetype }) {
+  if (!caseId) throw new Error('caseId is required.');
+  if (!data) throw new Error('file data is required.');
+  const safeMimetype = String(mimetype || '').toLowerCase().split(';')[0].trim();
+  if (!ALLOWED_MIMETYPES.has(safeMimetype)) throw new Error(`Unsupported Salesforce file type: ${safeMimetype || 'unknown'}.`);
+
+  const safeFilename = sanitizeFilename(filename, safeMimetype);
+  const title = safeFilename.replace(/\.[^.]+$/, '') || 'whatsapp-media';
+  const payload = {
+    Title: title,
+    PathOnClient: safeFilename,
+    VersionData: normalizeBase64Data(data, safeMimetype),
+    FirstPublishLocationId: caseId,
+  };
+
+  const created = await sfRequest('POST', '/sobjects/ContentVersion', payload);
+  const versionId = created?.id;
+  if (!versionId) throw new Error('Salesforce no retornó ContentVersion.Id.');
+
+  const version = await sfRequest(
+    'GET',
+    `/sobjects/ContentVersion/${versionId}?fields=Id,ContentDocumentId,Title,PathOnClient`
+  );
+
+  return {
+    contentVersionId: versionId,
+    contentDocumentId: version?.ContentDocumentId || null,
+    title: version?.Title || title,
+    pathOnClient: version?.PathOnClient || payload.PathOnClient,
+  };
+}
+
+async function createCaseComment(caseId, body) {
+  if (!caseId) throw new Error('caseId is required.');
+  if (!body || !String(body).trim()) throw new Error('CommentBody is required.');
+
+  const created = await sfRequest('POST', '/sobjects/CaseComment', {
+    ParentId: caseId,
+    CommentBody: String(body),
+    IsPublished: false,
+  });
+
+  return { id: created?.id, success: !!created?.success };
+}
+
+function __setTokenCacheForTests({ accessToken = 'test-token', expiresAt = Date.now() + 60000 } = {}) {
+  tokenCache.accessToken = accessToken;
+  tokenCache.expiresAt = expiresAt;
+}
+
+function __resetCachesForTests() {
+  tokenCache = { accessToken: null, expiresAt: 0, idUrl: null, ownerInfo: null };
+  describeCache = { data: null, expiresAt: 0 };
+}
+
 async function asignarmeCase(id) {
   const owner = await getOwnerInfo();
   if (!owner?.userId) throw new Error('No se pudo obtener el ID del analista autenticado.');
@@ -433,10 +502,26 @@ async function asignarmeCase(id) {
 // ── Account Lookup (SOQL) ────────────────────────────────────────────────────
 
 async function buscarCuentas(texto) {
-  if (!texto || texto.trim().length < 3) return [];
-  const soql = `SELECT Id, Name FROM Account WHERE Name LIKE '%${texto.replace(/'/g, "\\'")}%' LIMIT 5`;
+  const term = normalizeAccountSearchText(texto);
+  if (term.length < 3) return [];
+  const soql = `SELECT Id, Name FROM Account WHERE Name LIKE '%${term}%' LIMIT 5`;
   const data  = await sfRequest('GET', `/query?q=${encodeURIComponent(soql)}`);
   return (data?.records || []).map(r => ({ id: r.Id, name: r.Name }));
+}
+
+function normalizeAccountSearchText(texto) {
+  const term = String(texto || '').normalize('NFKC').trim().replace(/\s+/g, ' ');
+  if (term.length > 80) {
+    const err = new Error('Account search text is too long.');
+    err.statusCode = 400;
+    throw err;
+  }
+  if (term && !/^[\p{L}\p{N} .&-]+$/u.test(term)) {
+    const err = new Error('Account search text contains unsupported characters.');
+    err.statusCode = 400;
+    throw err;
+  }
+  return term;
 }
 
 module.exports = {
@@ -449,6 +534,11 @@ module.exports = {
   getDescribe,
   actualizarCase,
   cerrarCase,
+  uploadFileToCase,
+  createCaseComment,
   asignarmeCase,
   buscarCuentas,
+  normalizeAccountSearchText,
+  __setTokenCacheForTests,
+  __resetCachesForTests,
 };

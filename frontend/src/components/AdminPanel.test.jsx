@@ -56,6 +56,39 @@ const BOT_FLOWS = {
   cache: [{ key: 'global', area_id: null, source: 'database', version_id: 1, age_ms: 100, expires_in_ms: 59000 }],
 };
 
+const REPORT_SUMMARY = {
+  total_tickets: 12,
+  open_tickets: 5,
+  closed_tickets: 7,
+  sf_attachments: 4,
+  avg_close_minutes: 38,
+  by_area: [
+    { area: 'Billing', total: 8, open: 3, closed: 5 },
+    { area: 'Soporte técnico', total: 4, open: 2, closed: 2 },
+  ],
+};
+
+const AUDIT_LOGS = [
+  {
+    id: 10,
+    action: 'ticket.closed',
+    actor_name: 'Admin Root',
+    actor_role: 'admin',
+    target_id: '33',
+    metadata: { sf_case_id: '500ABC', transcript_chunks: 2 },
+    created_at: '2026-07-09T11:00:00.000Z',
+  },
+  {
+    id: 11,
+    action: 'flow.cache_invalidated',
+    actor_name: 'Admin Root',
+    actor_role: 'admin',
+    target_id: 'global',
+    metadata: { area_id: null },
+    created_at: '2026-07-09T10:00:00.000Z',
+  },
+];
+
 function jsonResponse(payload, init = {}) {
   return new Response(JSON.stringify(payload), {
     status: init.status || 200,
@@ -78,7 +111,7 @@ function mockLocalStorage() {
 
 function mockAdminFetch() {
   globalThis.fetch = vi.fn((url, options = {}) => {
-    const { pathname } = new URL(url, window.location.origin);
+    const { pathname, searchParams } = new URL(url, window.location.origin);
 
     if (options.method === 'POST' || options.method === 'PATCH') {
       return Promise.resolve(jsonResponse({ ok: true }));
@@ -88,6 +121,13 @@ function mockAdminFetch() {
     if (pathname === '/api/admin/analysts') return Promise.resolve(jsonResponse(ANALYSTS));
     if (pathname === '/api/admin/queue') return Promise.resolve(jsonResponse(QUEUE));
     if (pathname === '/api/admin/bot-flows') return Promise.resolve(jsonResponse(BOT_FLOWS));
+    if (pathname === '/api/admin/reports/summary') return Promise.resolve(jsonResponse(REPORT_SUMMARY));
+    if (pathname === '/api/admin/audit') {
+      const filteredLogs = searchParams.get('action')
+        ? AUDIT_LOGS.filter(log => log.action === searchParams.get('action'))
+        : AUDIT_LOGS;
+      return Promise.resolve(jsonResponse(filteredLogs));
+    }
 
     return Promise.resolve(jsonResponse({ error: 'Not found' }, { status: 404 }));
   });
@@ -129,6 +169,12 @@ describe('AdminPanel', () => {
     expect(screen.getByText(/Cola híbrida con asignación manual/i)).toBeInTheDocument();
     expect(screen.getByText(/La asignación automática solo aplica a tickets con área definida/i)).toBeInTheDocument();
     expect(screen.getByText('Tickets actuales')).toBeInTheDocument();
+    expect(screen.getByText('Resumen operativo y Salesforce')).toBeInTheDocument();
+    expect(screen.getByText('Adjuntos en Salesforce')).toBeInTheDocument();
+    expect(screen.getByText('Soporte técnico')).toBeInTheDocument();
+    expect(screen.getByText('Eventos administrativos recientes')).toBeInTheDocument();
+    expect(screen.getAllByText('Ticket cerrado')).not.toHaveLength(0);
+    expect(screen.getByText(/sf_case_id: 500ABC/i)).toBeInTheDocument();
     expect(screen.getByText('Plantillas de mensajes de WhatsApp')).toBeInTheDocument();
     expect(screen.getByText(/plantillas para momentos específicos/i)).toBeInTheDocument();
     expect(screen.getByText(/no es un editor visual de flujos todavía/i)).toBeInTheDocument();
@@ -144,6 +190,32 @@ describe('AdminPanel', () => {
     expect(screen.queryByText('Operations topology')).not.toBeInTheDocument();
   });
 
+  it('filters audit history with backend-supported query parameters', async () => {
+    const user = userEvent.setup();
+    mockAdminFetch();
+
+    render(<AdminPanel onLogout={vi.fn()} />);
+    await screen.findByText('Eventos administrativos recientes');
+    await screen.findAllByText('Ticket cerrado');
+
+    await user.selectOptions(screen.getByLabelText('Acción'), 'flow.cache_invalidated');
+    await user.selectOptions(screen.getByLabelText('Rol'), 'admin');
+    await user.type(screen.getByLabelText('ID objetivo'), 'global');
+    await user.click(screen.getByRole('button', { name: /aplicar filtros/i }));
+
+    await waitFor(() => {
+      const auditRequest = fetch.mock.calls.findLast(([url]) => new URL(url, window.location.origin).pathname === '/api/admin/audit');
+      const auditUrl = new URL(auditRequest[0], window.location.origin);
+      expect(auditUrl.searchParams.get('action')).toBe('flow.cache_invalidated');
+      expect(auditUrl.searchParams.get('actor_role')).toBe('admin');
+      expect(auditUrl.searchParams.get('target_id')).toBe('global');
+      expect(auditUrl.searchParams.get('limit')).toBe('10');
+      expect(auditUrl.searchParams.get('offset')).toBe('0');
+    });
+
+    expect(screen.getAllByText('Caché de flujos invalidada')).not.toHaveLength(0);
+  });
+
   it('surfaces the friendly Spanish backend connectivity error when HTML is returned', async () => {
     globalThis.fetch = vi.fn(() => Promise.resolve(new Response('<!DOCTYPE html><html></html>', {
       status: 200,
@@ -152,7 +224,7 @@ describe('AdminPanel', () => {
 
     render(<AdminPanel onLogout={vi.fn()} />);
 
-    expect(await screen.findByText(/No se pudo conectar con la API del backend/i)).toBeInTheDocument();
+    expect(await screen.findAllByText(/No se pudo conectar con la API del backend/i)).not.toHaveLength(0);
     expect(screen.getByText(/Endpoint: \/api\/admin\/areas/i)).toBeInTheDocument();
   });
 

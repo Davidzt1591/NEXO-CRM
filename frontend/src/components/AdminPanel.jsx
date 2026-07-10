@@ -7,10 +7,14 @@ import {
   Check,
   CircleDot,
   Clock,
+  FileText,
+  History,
   LogOut,
+  Paperclip,
   RefreshCw,
   Save,
   ShieldCheck,
+  TrendingUp,
   UserCog,
   Users,
 } from 'lucide-react';
@@ -45,6 +49,31 @@ const EMPTY_FLOW_FORM = {
   sort_order: 0,
   active: true,
 };
+
+const AUDIT_PAGE_SIZE = 10;
+
+const EMPTY_AUDIT_FILTERS = {
+  action: '',
+  actor_role: '',
+  target_id: '',
+};
+
+const AUDIT_ACTION_LABELS = Object.freeze({
+  'area.created': 'Área creada',
+  'area.updated': 'Área actualizada',
+  'analyst.created': 'Analista creado',
+  'analyst.updated': 'Analista actualizado',
+  'ticket.assigned': 'Ticket asignado',
+  'ticket.unassigned': 'Ticket sin asignación',
+  'ticket.transferred': 'Ticket transferido',
+  'ticket.closed': 'Ticket cerrado',
+  'flow.created': 'Flujo creado',
+  'flow.updated': 'Flujo actualizado',
+  'flow.toggled': 'Flujo activado/desactivado',
+  'flow.cache_invalidated': 'Caché de flujos invalidada',
+});
+
+const AUDIT_ACTION_OPTIONS = Object.entries(AUDIT_ACTION_LABELS);
 
 const SUPPORTED_BOT_FLOW_STEPS = Object.freeze([
   { key: 'out_of_office', label: 'Fuera de horario' },
@@ -107,6 +136,29 @@ function normalizeFlowPayload(form) {
   };
 }
 
+function formatNumber(value) {
+  return new Intl.NumberFormat('es-CO').format(Number(value) || 0);
+}
+
+function formatMinutes(value) {
+  if (value === null || value === undefined) return 'Sin datos';
+  const minutes = Number(value);
+  if (!Number.isFinite(minutes)) return 'Sin datos';
+  if (minutes < 60) return `${Math.round(minutes)} min`;
+  return `${Math.round(minutes / 60)} h`;
+}
+
+function auditActionLabel(action) {
+  return AUDIT_ACTION_LABELS[action] || action || 'Acción sin nombre';
+}
+
+function auditMetadataPreview(metadata) {
+  if (!metadata || typeof metadata !== 'object') return 'Sin detalle adicional';
+  const entries = Object.entries(metadata).filter(([, value]) => value !== null && value !== undefined && value !== '');
+  if (entries.length === 0) return 'Sin detalle adicional';
+  return entries.slice(0, 3).map(([key, value]) => `${key}: ${String(value)}`).join(' · ');
+}
+
 function slaLabel(sla) {
   if (!sla) return 'Sin SLA';
   if (sla.state === 'breached') return 'Vencido';
@@ -161,17 +213,24 @@ export default function AdminPanel({ socket, onLogout }) {
   const [botFlows, setBotFlows] = useState([]);
   const [flowCache, setFlowCache] = useState([]);
   const [assigningTicketId, setAssigningTicketId] = useState(null);
+  const [reportSummary, setReportSummary] = useState(null);
+  const [auditLogs, setAuditLogs] = useState([]);
+  const [auditFilters, setAuditFilters] = useState(EMPTY_AUDIT_FILTERS);
+  const [auditPage, setAuditPage] = useState(0);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [auditError, setAuditError] = useState(null);
 
   const loadAdminData = useCallback(async ({ backgroundRefresh = false } = {}) => {
     if (!backgroundRefresh) setLoading(true);
     setError(null);
 
     try {
-      const [nextAreas, nextAnalysts, nextQueue, nextFlows] = await Promise.all([
+      const [nextAreas, nextAnalysts, nextQueue, nextFlows, nextSummary] = await Promise.all([
         apiRequest('/api/admin/areas'),
         apiRequest('/api/admin/analysts'),
         apiRequest('/api/admin/queue'),
         apiRequest('/api/admin/bot-flows?active=all'),
+        apiRequest('/api/admin/reports/summary'),
       ]);
 
       setAreas(Array.isArray(nextAreas) ? nextAreas : []);
@@ -179,6 +238,7 @@ export default function AdminPanel({ socket, onLogout }) {
       setQueueTickets(Array.isArray(nextQueue?.tickets) ? nextQueue.tickets : []);
       setBotFlows(Array.isArray(nextFlows?.flows) ? nextFlows.flows : []);
       setFlowCache(Array.isArray(nextFlows?.cache) ? nextFlows.cache : []);
+      setReportSummary(nextSummary && typeof nextSummary === 'object' ? nextSummary : null);
       setForbidden(false);
       setLastRefresh(new Date());
     } catch (err) {
@@ -189,9 +249,36 @@ export default function AdminPanel({ socket, onLogout }) {
     }
   }, []);
 
+  const loadAuditData = useCallback(async ({ page = auditPage, filters = auditFilters } = {}) => {
+    setAuditLoading(true);
+    setAuditError(null);
+
+    try {
+      const params = new URLSearchParams({
+        limit: String(AUDIT_PAGE_SIZE),
+        offset: String(page * AUDIT_PAGE_SIZE),
+      });
+      if (filters.action) params.set('action', filters.action);
+      if (filters.actor_role) params.set('actor_role', filters.actor_role);
+      if (filters.target_id.trim()) params.set('target_id', filters.target_id.trim());
+
+      const nextLogs = await apiRequest(`/api/admin/audit?${params.toString()}`);
+      setAuditLogs(Array.isArray(nextLogs) ? nextLogs : []);
+    } catch (err) {
+      setAuditError(err.message || 'No se pudo cargar el historial de auditoría.');
+      setAuditLogs([]);
+    } finally {
+      setAuditLoading(false);
+    }
+  }, [auditFilters, auditPage]);
+
   useEffect(() => {
     loadAdminData();
   }, [loadAdminData]);
+
+  useEffect(() => {
+    loadAuditData();
+  }, [loadAuditData]);
 
   useEffect(() => {
     const interval = window.setInterval(() => loadAdminData({ backgroundRefresh: true }), ADMIN_REFRESH_INTERVAL_MS);
@@ -226,6 +313,8 @@ export default function AdminPanel({ socket, onLogout }) {
   const activeQueueTickets = useMemo(() => queueTickets.filter(ticket => ticket.status !== 'closed'), [queueTickets]);
   const slaRiskTickets = useMemo(() => activeQueueTickets.filter(ticket => ['warning', 'breached'].includes(ticket.sla?.state)), [activeQueueTickets]);
   const areaNameById = useMemo(() => new Map(areas.map(area => [String(area.id), area.name])), [areas]);
+  const reportByArea = Array.isArray(reportSummary?.by_area) ? reportSummary.by_area : [];
+  const hasAuditNextPage = auditLogs.length === AUDIT_PAGE_SIZE;
 
   const resetAreaForm = () => setAreaForm(EMPTY_AREA_FORM);
   const resetAnalystForm = () => setAnalystForm(EMPTY_ANALYST_FORM);
@@ -433,6 +522,11 @@ export default function AdminPanel({ socket, onLogout }) {
     }
   };
 
+  const updateAuditFilter = (field, value) => {
+    setAuditFilters(prev => ({ ...prev, [field]: value }));
+    setAuditPage(0);
+  };
+
   if (forbidden) {
     return (
       <div className="admin-shell admin-shell--centered">
@@ -496,6 +590,124 @@ export default function AdminPanel({ socket, onLogout }) {
         <AdminAlert>
           La presencia se actualiza cada {ADMIN_REFRESH_INTERVAL_MS / 1000} segundos y cuando el socket se reconecta. Los cambios de asignación refrescan la cola en tiempo real.
         </AdminAlert>
+
+        <section className="admin-card admin-card--wide admin-reports-card">
+          <div className="admin-section-heading">
+            <div>
+              <p className="admin-kicker">Reportes de Fase 5</p>
+              <h3>Resumen operativo y Salesforce</h3>
+            </div>
+            {loading && <div className="qr-loading__spinner admin-mini-spinner" />}
+          </div>
+
+          <div className="admin-report-grid">
+            <AdminStat icon={FileText} label="Tickets totales" value={formatNumber(reportSummary?.total_tickets)} />
+            <AdminStat icon={Activity} label="Tickets abiertos" value={formatNumber(reportSummary?.open_tickets)} tone="amber" />
+            <AdminStat icon={Check} label="Tickets cerrados" value={formatNumber(reportSummary?.closed_tickets)} tone="green" />
+            <AdminStat icon={Paperclip} label="Adjuntos en Salesforce" value={formatNumber(reportSummary?.sf_attachments)} tone="purple" />
+            <AdminStat icon={TrendingUp} label="Promedio de cierre" value={formatMinutes(reportSummary?.avg_close_minutes)} tone="green" />
+          </div>
+
+          <div className="admin-table-wrap admin-report-table-wrap">
+            <table className="admin-table admin-table--compact">
+              <thead>
+                <tr>
+                  <th>Área</th>
+                  <th>Total</th>
+                  <th>Abiertos</th>
+                  <th>Cerrados</th>
+                </tr>
+              </thead>
+              <tbody>
+                {reportByArea.length === 0 && !loading ? (
+                  <tr><td colSpan="4" className="admin-empty">Aún no hay datos suficientes para el resumen por área.</td></tr>
+                ) : reportByArea.map(area => (
+                  <tr key={area.area || 'Sin área'}>
+                    <td><strong>{area.area || 'Sin área'}</strong></td>
+                    <td>{formatNumber(area.total)}</td>
+                    <td>{formatNumber(area.open)}</td>
+                    <td>{formatNumber(area.closed)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section className="admin-card admin-card--wide admin-audit-card">
+          <div className="admin-section-heading">
+            <div>
+              <p className="admin-kicker">Historial de auditoría</p>
+              <h3>Eventos administrativos recientes</h3>
+            </div>
+            {auditLoading && <div className="qr-loading__spinner admin-mini-spinner" />}
+          </div>
+
+          <div className="admin-audit-controls">
+            <label>
+              <span>Acción</span>
+              <select value={auditFilters.action} onChange={event => updateAuditFilter('action', event.target.value)}>
+                <option value="">Todas las acciones</option>
+                {AUDIT_ACTION_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              </select>
+            </label>
+            <label>
+              <span>Rol</span>
+              <select value={auditFilters.actor_role} onChange={event => updateAuditFilter('actor_role', event.target.value)}>
+                <option value="">Todos los roles</option>
+                <option value="admin">Administrador</option>
+                <option value="agent">Analista</option>
+              </select>
+            </label>
+            <label>
+              <span>ID objetivo</span>
+              <input value={auditFilters.target_id} onChange={event => updateAuditFilter('target_id', event.target.value)} placeholder="Ticket, área o flujo" />
+            </label>
+            <button className="admin-soft-btn" onClick={() => loadAuditData()} disabled={auditLoading}>
+              <History size={14} /> Aplicar filtros
+            </button>
+          </div>
+
+          {auditError && <AdminAlert type="error">{auditError}</AdminAlert>}
+
+          <div className="admin-table-wrap">
+            <table className="admin-table admin-table--audit">
+              <thead>
+                <tr>
+                  <th>Fecha</th>
+                  <th>Acción</th>
+                  <th>Actor</th>
+                  <th>Objetivo</th>
+                  <th>Detalle</th>
+                </tr>
+              </thead>
+              <tbody>
+                {auditLogs.length === 0 && !auditLoading ? (
+                  <tr><td colSpan="5" className="admin-empty">No hay eventos de auditoría para los filtros seleccionados.</td></tr>
+                ) : auditLogs.map(log => (
+                  <tr key={log.id || `${log.action}-${log.created_at}-${log.target_id}`}>
+                    <td>{formatDate(log.created_at)}</td>
+                    <td><span className="admin-pill admin-pill--muted">{auditActionLabel(log.action)}</span></td>
+                    <td>
+                      <strong>{log.actor_name || 'Sistema'}</strong>
+                      <span className="admin-table-subtext">{log.actor_role || 'Sin rol'}</span>
+                    </td>
+                    <td>{log.target_id || 'Sin objetivo'}</td>
+                    <td>{auditMetadataPreview(log.metadata)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="admin-pagination-row">
+            <span>Página {auditPage + 1}</span>
+            <div className="admin-row-actions">
+              <button className="admin-soft-btn" disabled={auditPage === 0 || auditLoading} onClick={() => setAuditPage(prev => Math.max(prev - 1, 0))}>Anterior</button>
+              <button className="admin-soft-btn" disabled={!hasAuditNextPage || auditLoading} onClick={() => setAuditPage(prev => prev + 1)}>Siguiente</button>
+            </div>
+          </div>
+        </section>
 
         <section className="admin-card admin-card--wide admin-flow-manager">
           <div className="admin-section-heading">
