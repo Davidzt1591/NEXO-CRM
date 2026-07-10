@@ -46,6 +46,20 @@ function formatTime(ts) {
   return d.toLocaleDateString('es-CO', { day: '2-digit', month: 'short' });
 }
 
+function slaLabel(sla) {
+  if (!sla) return 'Sin SLA';
+  if (sla.state === 'breached') return 'SLA vencido';
+  if (sla.state === 'warning') return 'SLA por vencer';
+  return 'SLA en tiempo';
+}
+
+function assignmentLabel(contact) {
+  const analyst = contact.assignment?.analyst;
+  if (analyst?.display_name) return analyst.display_name;
+  if (contact.assignment?.analyst_id) return `Analista #${contact.assignment.analyst_id}`;
+  return 'Sin asignar';
+}
+
 function avatarColor(name) {
   const colors = ['#7c3aed', '#0ea5e9', '#10b981', '#f59e0b', '#ef4444', '#ec4899'];
   const i = name ? name.charCodeAt(0) % colors.length : 0;
@@ -323,6 +337,9 @@ function ContactCard({ contact, isSelected, mode, isSilenced, unread, onClick })
         <p className="contact-card__preview">{contact.lastMessage || 'Sin mensajes'}</p>
         <div className="contact-card__tags">
           {p && <span className={`priority-badge ${p.cls}`}>{p.label}</span>}
+          <span className="tag tag--area">{contact.area?.name || 'Sin área'}</span>
+          <span className={`tag tag--sla-${contact.sla?.state || 'none'}`}>{slaLabel(contact.sla)}</span>
+          <span className={`tag ${contact.assignment?.analyst_id ? 'tag--assigned' : 'tag--unassigned'}`}>{assignmentLabel(contact)}</span>
           {tag === 'proveedor' && <span className="tag tag--proveedor">🛡️ PROV</span>}
           {tag === 'cliente_vip' && <span className="tag tag--vip">⭐ VIP</span>}
           {mode === 'manual'  && <span className="tag tag--manual">Manual</span>}
@@ -411,6 +428,7 @@ export default function App() {
   const [systemInfo, setSystemInfo] = useState(null);
   const [logs, setLogs] = useState([]);
   const [logsLoading, setLogsLoading] = useState(false);
+  const [principal, setPrincipal] = useState(null);
 
   // Salesforce Modal
   const [sfModal, setSfModal] = useState({ open: false, ticket: null });
@@ -495,6 +513,7 @@ export default function App() {
     });
 
     socket.on('bot-activo', (valor) => setBotActivo(valor));
+    socket.on('principal-info', (info) => setPrincipal(info));
 
     socket.on('qr-cleared', () => {
       setQrDataUrl(null);
@@ -619,6 +638,29 @@ export default function App() {
         }
         return next;
       });
+    });
+
+    const mergeTicket = (ticket) => {
+      if (!ticket?.id) return;
+      const key = String(ticket.id);
+      setContacts(prev => ({
+        ...prev,
+        [key]: {
+          ...(prev[key] || {}),
+          ...ticket,
+          chatId: ticket.telefono || prev[key]?.chatId,
+          contactKey: key,
+          lastTimestamp: prev[key]?.lastTimestamp || ticket.created_at,
+          lastMessage: prev[key]?.lastMessage || ticket.situacion || '',
+        },
+      }));
+    };
+
+    socket.on('ticket-assigned', mergeTicket);
+    socket.on('queue-updated', ({ ticket }) => mergeTicket(ticket));
+    socket.on('sla-alert', ({ ticketId, sla }) => {
+      const key = String(ticketId);
+      setContacts(prev => prev[key] ? { ...prev, [key]: { ...prev[key], sla } } : prev);
     });
 
     socket.on('mode-changed',    ({ chatId, mode }) => setChatModes(prev => ({ ...prev, [chatId]: mode })));
@@ -860,12 +902,17 @@ export default function App() {
   const openCount     = allContacts.filter(c => c.status !== 'closed').length;
   const highCount     = allContacts.filter(c => c.prioridad === 'Alta' && c.status !== 'closed').length;
   const manualCount   = allContacts.filter(c => chatModes[c.chatId] === 'manual' && c.status !== 'closed').length;
+  const myAnalystId   = principal?.analyst?.id;
 
   // Filter + search
   const visibleContacts = allContacts
     .filter(c => {
+      if (filter === 'all')      return c.status !== 'closed';
       if (filter === 'alta')     return c.prioridad === 'Alta'           && c.status !== 'closed';
       if (filter === 'manual')   return chatModes[c.chatId] === 'manual' && c.status !== 'closed';
+      if (filter === 'mine')     return String(c.assignment?.analyst_id || '') === String(myAnalystId || '') && c.status !== 'closed';
+      if (filter === 'unassigned') return !c.assignment?.analyst_id      && c.status !== 'closed';
+      if (filter === 'sla')      return ['warning', 'breached'].includes(c.sla?.state) && c.status !== 'closed';
       if (filter === 'silenced') return silenced[c.chatId]               && c.status !== 'closed';
       if (filter === 'cerrados') return c.status === 'closed';
       return c.status !== 'closed'; // 'all' → solo activos
@@ -1021,7 +1068,16 @@ export default function App() {
 
               {/* Filtros */}
               <div className="filter-tabs">
-                {[['all','Activos'],['alta','Alta'],['manual','Manual'],['silenced','Silenc.'],['cerrados','Cerrados']].map(([id, label]) => (
+                {[
+                  ['all','Activos'],
+                  ['mine','Asignados a mí'],
+                  ['unassigned','Sin asignar'],
+                  ['sla','SLA crítico'],
+                  ['alta','Alta'],
+                  ['manual','Manual'],
+                  ['silenced','Silenc.'],
+                  ['cerrados','Cerrados'],
+                ].map(([id, label]) => (
                   <button
                     key={id}
                     onClick={() => setFilter(id)}
@@ -1400,6 +1456,13 @@ export default function App() {
                   <PriorityBadge priority={selectedContact.prioridad} />
                 </div>
               )}
+              <DetailRow label="Área" value={selectedContact.area?.name || (selectedContact.area_id ? `Área #${selectedContact.area_id}` : 'Sin área asignada')} />
+              <DetailRow label="Asignación" value={assignmentLabel(selectedContact)} />
+              <DetailRow
+                label="SLA"
+                value={selectedContact.sla ? `${slaLabel(selectedContact.sla)} · ${selectedContact.sla.age_minutes} min · vence ${formatTime(selectedContact.sla.due_at)}` : 'Sin SLA calculado'}
+                colorClass={selectedContact.sla?.state === 'breached' ? 'text-danger' : selectedContact.sla?.state === 'warning' ? 'text-warning' : 'text-success'}
+              />
               <DetailRow
                 label="Estado"
                 value={selectedContact.status === 'closed' ? 'Cerrado' : 'Abierto'}

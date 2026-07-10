@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import AdminPanel from './AdminPanel';
@@ -20,7 +20,33 @@ const ANALYSTS = [
     area: { name: 'Billing' },
     token: { name: 'Ada token' },
   },
+  {
+    id: 3,
+    display_name: 'No Area Analyst',
+    token_id: null,
+    area_id: null,
+    available: true,
+    last_seen: null,
+    area: null,
+    token: null,
+  },
 ];
+
+const QUEUE = {
+  tickets: [
+    {
+      id: 33,
+      telefono: '573001112233',
+      nombre_empresa: 'Acme',
+      area_id: 1,
+      status: 'open',
+      created_at: '2026-07-09T10:00:00.000Z',
+      area: { id: 1, name: 'Billing', sla_minutes: 15 },
+      assignment: null,
+      sla: { state: 'warning', age_minutes: 12, due_at: '2026-07-09T10:15:00.000Z' },
+    },
+  ],
+};
 
 function jsonResponse(payload, init = {}) {
   return new Response(JSON.stringify(payload), {
@@ -52,6 +78,7 @@ function mockAdminFetch() {
 
     if (pathname === '/api/admin/areas') return Promise.resolve(jsonResponse(AREAS));
     if (pathname === '/api/admin/analysts') return Promise.resolve(jsonResponse(ANALYSTS));
+    if (pathname === '/api/admin/queue') return Promise.resolve(jsonResponse(QUEUE));
 
     return Promise.resolve(jsonResponse({ error: 'Not found' }, { status: 404 }));
   });
@@ -84,16 +111,20 @@ describe('AdminPanel', () => {
     expect(screen.getByText(/no tiene permisos para ingresar al panel de administración/i)).toBeInTheDocument();
   });
 
-  it('renders the Spanish Phase 2 admin intro, areas, and analysts from successful admin API responses', async () => {
+  it('renders the Spanish Phase 4 admin intro, queue, areas, and analysts from successful admin API responses', async () => {
     mockAdminFetch();
 
     render(<AdminPanel onLogout={vi.fn()} />);
 
     expect(await screen.findByText('Panel de administración')).toBeInTheDocument();
-    expect(screen.getByText(/En esta fase, \/admin contiene la configuración de áreas de soporte/i)).toBeInTheDocument();
-    expect(screen.getByText(/Flujos del bot, reportes, carga de Salesforce/i)).toBeInTheDocument();
+    expect(screen.getByText(/Cola híbrida con asignación manual/i)).toBeInTheDocument();
+    expect(screen.getByText(/La asignación automática solo aplica a tickets con área definida/i)).toBeInTheDocument();
+    expect(screen.getByText('Tickets actuales')).toBeInTheDocument();
+    expect(screen.getByText('Acme')).toBeInTheDocument();
+    expect(screen.getByText(/Por vencer/i)).toBeInTheDocument();
     expect(await screen.findAllByText('Billing')).not.toHaveLength(0);
-    expect(screen.getByText('Ada Lovelace')).toBeInTheDocument();
+    expect(screen.getAllByText('Ada Lovelace')).not.toHaveLength(0);
+    expect(within(screen.getByLabelText('Asignar ticket #33')).queryByRole('option', { name: /No Area Analyst/i })).not.toBeInTheDocument();
     expect(screen.getByText('Ada token')).toBeInTheDocument();
     expect(screen.queryByText('Admin Panel')).not.toBeInTheDocument();
     expect(screen.queryByText('Operations topology')).not.toBeInTheDocument();
@@ -116,7 +147,7 @@ describe('AdminPanel', () => {
     mockAdminFetch();
 
     render(<AdminPanel onLogout={vi.fn()} />);
-    await screen.findByText('Ada Lovelace');
+    await screen.findAllByText('Ada Lovelace');
 
     await user.type(screen.getByLabelText('Nombre'), 'Integrations');
     await user.click(screen.getByRole('button', { name: /crear área/i }));
@@ -149,7 +180,7 @@ describe('AdminPanel', () => {
     mockAdminFetch();
 
     const { unmount } = render(<AdminPanel socket={socket} onLogout={vi.fn()} />);
-    await screen.findByText('Ada Lovelace');
+    await screen.findAllByText('Ada Lovelace');
 
     unmount();
 
@@ -158,5 +189,8 @@ describe('AdminPanel', () => {
     expect(socket.off).toHaveBeenCalledWith('disconnect', expect.any(Function));
     expect(socket.off).toHaveBeenCalledWith('analyst-presence', expect.any(Function));
     expect(socket.off).toHaveBeenCalledWith('analyst-updated', expect.any(Function));
+    expect(socket.off).toHaveBeenCalledWith('ticket-assigned', expect.any(Function));
+    expect(socket.off).toHaveBeenCalledWith('queue-updated', expect.any(Function));
+    expect(socket.off).toHaveBeenCalledWith('sla-alert', expect.any(Function));
   });
 });

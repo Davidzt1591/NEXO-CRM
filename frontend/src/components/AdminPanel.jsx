@@ -69,6 +69,20 @@ function normalizeAnalystPayload(form) {
   };
 }
 
+function slaLabel(sla) {
+  if (!sla) return 'Sin SLA';
+  if (sla.state === 'breached') return 'Vencido';
+  if (sla.state === 'warning') return 'Por vencer';
+  return 'En tiempo';
+}
+
+function analystLabel(ticket) {
+  const analyst = ticket.assignment?.analyst;
+  if (analyst?.display_name) return analyst.display_name;
+  if (ticket.assignment?.analyst_id) return `Analista #${ticket.assignment.analyst_id}`;
+  return 'Sin asignar';
+}
+
 function AdminStat({ icon, label, value, tone = 'cyan' }) {
   const StatIcon = icon;
   return (
@@ -103,19 +117,23 @@ export default function AdminPanel({ socket, onLogout }) {
   const [notice, setNotice] = useState(null);
   const [forbidden, setForbidden] = useState(false);
   const [lastRefresh, setLastRefresh] = useState(null);
+  const [queueTickets, setQueueTickets] = useState([]);
+  const [assigningTicketId, setAssigningTicketId] = useState(null);
 
   const loadAdminData = useCallback(async ({ backgroundRefresh = false } = {}) => {
     if (!backgroundRefresh) setLoading(true);
     setError(null);
 
     try {
-      const [nextAreas, nextAnalysts] = await Promise.all([
+      const [nextAreas, nextAnalysts, nextQueue] = await Promise.all([
         apiRequest('/api/admin/areas'),
         apiRequest('/api/admin/analysts'),
+        apiRequest('/api/admin/queue'),
       ]);
 
       setAreas(Array.isArray(nextAreas) ? nextAreas : []);
       setAnalysts(Array.isArray(nextAnalysts) ? nextAnalysts : []);
+      setQueueTickets(Array.isArray(nextQueue?.tickets) ? nextQueue.tickets : []);
       setForbidden(false);
       setLastRefresh(new Date());
     } catch (err) {
@@ -143,18 +161,26 @@ export default function AdminPanel({ socket, onLogout }) {
     socket.on('disconnect', refreshPresence);
     socket.on('analyst-presence', refreshPresence);
     socket.on('analyst-updated', refreshPresence);
+    socket.on('ticket-assigned', refreshPresence);
+    socket.on('queue-updated', refreshPresence);
+    socket.on('sla-alert', refreshPresence);
 
     return () => {
       socket.off('connect', refreshPresence);
       socket.off('disconnect', refreshPresence);
       socket.off('analyst-presence', refreshPresence);
       socket.off('analyst-updated', refreshPresence);
+      socket.off('ticket-assigned', refreshPresence);
+      socket.off('queue-updated', refreshPresence);
+      socket.off('sla-alert', refreshPresence);
     };
   }, [loadAdminData, socket]);
 
   const activeAreas = useMemo(() => areas.filter(area => area.active !== false), [areas]);
   const availableAnalysts = useMemo(() => analysts.filter(analyst => analyst.available), [analysts]);
-  const unassignedAnalysts = useMemo(() => analysts.filter(analyst => !analyst.area_id), [analysts]);
+  const activeQueueTickets = useMemo(() => queueTickets.filter(ticket => ticket.status !== 'closed'), [queueTickets]);
+  const unassignedQueueTickets = useMemo(() => activeQueueTickets.filter(ticket => !ticket.assignment?.analyst_id), [activeQueueTickets]);
+  const slaRiskTickets = useMemo(() => activeQueueTickets.filter(ticket => ['warning', 'breached'].includes(ticket.sla?.state)), [activeQueueTickets]);
 
   const resetAreaForm = () => setAreaForm(EMPTY_AREA_FORM);
   const resetAnalystForm = () => setAnalystForm(EMPTY_ANALYST_FORM);
@@ -262,6 +288,30 @@ export default function AdminPanel({ socket, onLogout }) {
     }
   };
 
+  const assignTicket = async (ticket, analystId) => {
+    setAssigningTicketId(ticket.id);
+    setError(null);
+    setNotice(null);
+
+    try {
+      if (!analystId) {
+        await apiRequest(`/api/admin/tickets/${ticket.id}/unassign`, { method: 'POST', body: jsonBody({}) });
+        setNotice(`Ticket #${ticket.id} quedó sin asignación.`);
+      } else {
+        await apiRequest(`/api/admin/tickets/${ticket.id}/assign`, {
+          method: 'POST',
+          body: jsonBody({ analyst_id: Number(analystId) }),
+        });
+        setNotice(`Ticket #${ticket.id} asignado correctamente.`);
+      }
+      await loadAdminData({ backgroundRefresh: true });
+    } catch (err) {
+      setError(err.message || 'No se pudo actualizar la asignación del ticket.');
+    } finally {
+      setAssigningTicketId(null);
+    }
+  };
+
   if (forbidden) {
     return (
       <div className="admin-shell admin-shell--centered">
@@ -306,25 +356,91 @@ export default function AdminPanel({ socket, onLogout }) {
       <main className="admin-workspace">
         <section className="admin-hero-card">
           <div>
-            <p className="admin-kicker">Administración de Fase 2</p>
-            <h2>Áreas de soporte, analistas y disponibilidad en un solo panel.</h2>
+            <p className="admin-kicker">Administración de Fase 4</p>
+            <h2>Cola híbrida con asignación manual, automática y seguimiento SLA.</h2>
             <p>
-              En esta fase, /admin contiene la configuración de áreas de soporte, el registro de analistas, la asignación de analistas a áreas y una vista de disponibilidad/presencia. Flujos del bot, reportes, carga de Salesforce y otros módulos administrativos pertenecen a fases futuras.
+              La asignación automática solo aplica a tickets con área definida y analista disponible. Los tickets sin área quedan pendientes hasta que un administrador los asigne o defina su área.
             </p>
           </div>
           <div className="admin-stat-grid">
             <AdminStat icon={Building2} label="Áreas activas" value={activeAreas.length} />
             <AdminStat icon={Users} label="Analistas" value={analysts.length} tone="purple" />
             <AdminStat icon={Activity} label="Disponibles" value={availableAnalysts.length} tone="green" />
-            <AdminStat icon={AlertTriangle} label="Sin asignar" value={unassignedAnalysts.length} tone="amber" />
+            <AdminStat icon={AlertTriangle} label="Tickets sin asignar" value={unassignedQueueTickets.length} tone="amber" />
           </div>
         </section>
 
         {error && <AdminAlert type="error">{error}</AdminAlert>}
         {notice && <AdminAlert type="success">{notice}</AdminAlert>}
         <AdminAlert>
-          La presencia se actualiza cada {ADMIN_REFRESH_INTERVAL_MS / 1000} segundos y cuando el socket se reconecta. No se asume ningún contrato de eventos en tiempo real fuera de lo soportado.
+          La presencia se actualiza cada {ADMIN_REFRESH_INTERVAL_MS / 1000} segundos y cuando el socket se reconecta. Los cambios de asignación refrescan la cola en tiempo real.
         </AdminAlert>
+
+        <section className="admin-card admin-card--wide">
+          <div className="admin-section-heading">
+            <div>
+              <p className="admin-kicker">Enrutamiento y cola</p>
+              <h3>Tickets actuales</h3>
+            </div>
+            <div className="admin-meta-row">
+              <span>{activeQueueTickets.length} activos</span>
+              <span>{slaRiskTickets.length} con SLA crítico</span>
+            </div>
+          </div>
+
+          <div className="admin-table-wrap">
+            <table className="admin-table admin-table--queue">
+              <thead>
+                <tr>
+                  <th>Ticket</th>
+                  <th>Área</th>
+                  <th>Asignación</th>
+                  <th>SLA</th>
+                  <th>Asignar a</th>
+                </tr>
+              </thead>
+              <tbody>
+                {activeQueueTickets.length === 0 && !loading ? (
+                  <tr><td colSpan="5" className="admin-empty">No hay tickets activos en la cola.</td></tr>
+                ) : activeQueueTickets.map(ticket => {
+                  const analystsForTicket = analysts.filter(analyst => {
+                    if (!ticket.area_id) return true;
+                    return analyst.area_id && String(analyst.area_id) === String(ticket.area_id);
+                  });
+                  return (
+                    <tr key={ticket.id}>
+                      <td>
+                        <strong>#{ticket.id}</strong>
+                        <span className="admin-table-subtext">{ticket.nombre_empresa || ticket.telefono || 'Sin contacto'}</span>
+                      </td>
+                      <td>{ticket.area?.name || 'Sin área pendiente'}</td>
+                      <td>{analystLabel(ticket)}</td>
+                      <td>
+                        <span className={`admin-pill admin-pill--sla-${ticket.sla?.state || 'none'}`}>
+                          {slaLabel(ticket.sla)} · {ticket.sla?.age_minutes ?? 0}m
+                        </span>
+                      </td>
+                      <td>
+                        <select
+                          className="admin-inline-select"
+                          aria-label={`Asignar ticket #${ticket.id}`}
+                          value={ticket.assignment?.analyst_id || ''}
+                          disabled={assigningTicketId === ticket.id}
+                          onChange={event => assignTicket(ticket, event.target.value)}
+                        >
+                          <option value="">Sin asignar</option>
+                          {analystsForTicket.map(analyst => (
+                            <option key={analyst.id} value={analyst.id}>{analyst.display_name}{analyst.available ? ' · disponible' : ''}</option>
+                          ))}
+                        </select>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </section>
 
         <div className="admin-grid">
           <section className="admin-card admin-card--form">

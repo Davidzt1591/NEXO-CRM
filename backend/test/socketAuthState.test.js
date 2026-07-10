@@ -130,3 +130,66 @@ test('chat operational emits include area room when chat ticket area resolves', 
   delete require.cache[dbPath];
   delete require.cache[whatsappPath];
 });
+
+test('routing updates target admin, area, analyst, and SLA alert rooms', () => {
+  const { emitRoutingUpdate } = loadSocketHelpers(false);
+  const io = createIo();
+
+  emitRoutingUpdate(io, {
+    id: 55,
+    area_id: 7,
+    assignment: { analyst_id: 9 },
+    sla: { state: 'breached', age_minutes: 45 },
+  });
+
+  assert.deepEqual(io.emissions, [
+    { rooms: ['admin', 'area:7'], event: 'ticket-assigned', payload: { id: 55, area_id: 7, assignment: { analyst_id: 9 }, sla: { state: 'breached', age_minutes: 45 } } },
+    { rooms: ['admin', 'area:7'], event: 'queue-updated', payload: { ticket: { id: 55, area_id: 7, assignment: { analyst_id: 9 }, sla: { state: 'breached', age_minutes: 45 } } } },
+    { rooms: ['analyst:9'], event: 'ticket-assigned', payload: { id: 55, area_id: 7, assignment: { analyst_id: 9 }, sla: { state: 'breached', age_minutes: 45 } } },
+    { rooms: ['admin', 'area:7'], event: 'sla-alert', payload: { ticketId: 55, sla: { state: 'breached', age_minutes: 45 } } },
+  ]);
+  delete require.cache[socketPath];
+  delete require.cache[dbPath];
+  delete require.cache[whatsappPath];
+});
+
+test('routing transfer updates target old and new area rooms', () => {
+  const { emitRoutingUpdate } = loadSocketHelpers(false);
+  const io = createIo();
+  const ticket = {
+    id: 56,
+    area_id: 8,
+    assignment: { analyst_id: 10 },
+    sla: { state: 'ok', age_minutes: 5 },
+  };
+
+  emitRoutingUpdate(io, ticket, { previousAreaId: 7 });
+
+  assert.deepEqual(io.emissions, [
+    { rooms: ['admin', 'area:7'], event: 'ticket-assigned', payload: ticket },
+    { rooms: ['admin', 'area:7'], event: 'queue-updated', payload: { ticket } },
+    { rooms: ['admin', 'area:8'], event: 'ticket-assigned', payload: ticket },
+    { rooms: ['admin', 'area:8'], event: 'queue-updated', payload: { ticket } },
+    { rooms: ['analyst:10'], event: 'ticket-assigned', payload: ticket },
+  ]);
+  delete require.cache[socketPath];
+  delete require.cache[dbPath];
+  delete require.cache[whatsappPath];
+});
+
+test('same-area analyst cannot self-assign a ticket already assigned to another analyst', () => {
+  const { canSelfAssignTicket } = loadSocketHelpers(false);
+  const socket = createSocket({ role: 'agent' });
+  socket.analyst = { id: 9, area_id: 7 };
+
+  const ticket = {
+    id: 55,
+    area_id: 7,
+    assignment: { analyst_id: 10 },
+  };
+
+  assert.equal(canSelfAssignTicket(socket, ticket), false);
+  delete require.cache[socketPath];
+  delete require.cache[dbPath];
+  delete require.cache[whatsappPath];
+});

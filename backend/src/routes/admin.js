@@ -6,6 +6,8 @@ const express = require('express');
 const router  = express.Router();
 const db      = require('../database/db');
 const botFlow = require('../services/botFlow');
+const routing = require('../services/routing');
+const { emitRoutingUpdate } = require('../socket');
 
 const asyncHandler = fn => (req, res) =>
   fn(req, res).catch(e => {
@@ -55,6 +57,12 @@ async function audit(req, action, targetId, metadata) {
     target_id: targetId ? String(targetId) : null,
     metadata,
   });
+}
+
+function emitRoutingFromRequest(req, ticket, options = {}) {
+  const io = req.app?.get?.('io');
+  if (!io) return;
+  emitRoutingUpdate(io, ticket, options);
 }
 
 // ── Areas ───────────────────────────────────────────────────────────────────
@@ -116,6 +124,52 @@ router.patch('/analysts/:id', asyncHandler(async (req, res) => {
 router.get('/audit', asyncHandler(async (req, res) => {
   const logs = await db.listAuditLogs(req.query.limit);
   res.json(logs);
+}));
+
+// ── Routing / Queue ────────────────────────────────────────────────────────
+router.get('/queue', asyncHandler(async (req, res) => {
+  const tickets = routing.enrichTickets(await db.getTicketsWithRouting());
+  res.json({ tickets });
+}));
+
+router.post('/tickets/:id/assign', asyncHandler(async (req, res) => {
+  const ticket = await routing.assignTicket(db, {
+    ticketId: req.params.id,
+    analystId: req.body?.analyst_id,
+    assignedBy: 'manual',
+    actor: req.user,
+  });
+
+  await audit(req, 'ticket.assigned', ticket.id, {
+    analyst_id: ticket.assignment?.analyst_id || null,
+    area_id: ticket.area_id || null,
+  });
+  emitRoutingFromRequest(req, ticket);
+  res.json(ticket);
+}));
+
+router.post('/tickets/:id/unassign', asyncHandler(async (req, res) => {
+  const ticket = await routing.unassignTicket(db, req.params.id, { assignedBy: 'manual' });
+  await audit(req, 'ticket.unassigned', ticket.id, { area_id: ticket.area_id || null });
+  emitRoutingFromRequest(req, ticket);
+  res.json(ticket);
+}));
+
+router.post('/tickets/:id/transfer', asyncHandler(async (req, res) => {
+  const previousTicket = await db.getTicketById(req.params.id);
+  const ticket = await routing.transferTicket(db, {
+    ticketId: req.params.id,
+    areaId: req.body?.area_id,
+    analystId: req.body?.analyst_id,
+    actor: req.user,
+  });
+
+  await audit(req, 'ticket.transferred', ticket.id, {
+    area_id: ticket.area_id || null,
+    analyst_id: ticket.assignment?.analyst_id || null,
+  });
+  emitRoutingFromRequest(req, ticket, { previousAreaId: previousTicket?.area_id || null });
+  res.json(ticket);
 }));
 
 // ── Bot flows ───────────────────────────────────────────────────────────────

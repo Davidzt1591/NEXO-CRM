@@ -7,6 +7,7 @@ const { analizarPrioridad } = require('../ai');
 const { crearCase }         = require('../salesforce');
 const botFlow               = require('../botFlow');
 const { emitOperational }   = require('../../realtime/operational');
+const routing               = require('../routing');
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -281,7 +282,11 @@ function createWhatsAppMessageHandler(io, client, options = {}) {
         s.paso     = 5;
         await syncSessionToDb(chatId);
 
-        emitOperational(io, 'ticket-created', ticket, ticket.area_id || null);
+        const routedTicket = await routing.autoRouteTicket(db, ticket);
+        emitOperational(io, 'ticket-created', routedTicket || ticket, (routedTicket || ticket).area_id || null);
+        if (routedTicket?.assignment?.analyst_id) {
+          emitOperational(io, 'ticket-assigned', routedTicket, routedTicket.area_id || null);
+        }
 
         let sfCaseNumber = null;
         let sfCaseId     = null;
@@ -303,7 +308,7 @@ function createWhatsAppMessageHandler(io, client, options = {}) {
             contactKey:     String(ticket.id),
             sf_case_id:     sfCaseId,
             sf_case_number: sfCaseNumber,
-          }, ticket.area_id || null);
+          }, (routedTicket || ticket).area_id || null);
         } catch (sfErr) {
           console.warn('⚠️ Salesforce no disponible, ticket local creado:', sfErr.message);
         }
@@ -540,7 +545,11 @@ function setupWhatsApp(io) {
         s.paso     = 5;
         await syncSessionToDb(chatId);
 
-        emitOperational(io, 'ticket-created', ticket, ticket.area_id || null);
+        const routedTicket = await routing.autoRouteTicket(db, ticket);
+        emitOperational(io, 'ticket-created', routedTicket || ticket, (routedTicket || ticket).area_id || null);
+        if (routedTicket?.assignment?.analyst_id) {
+          emitOperational(io, 'ticket-assigned', routedTicket, routedTicket.area_id || null);
+        }
 
         // ── Create Salesforce Case ─────────────────────────────────────
         let sfCaseNumber = null;
@@ -564,7 +573,7 @@ function setupWhatsApp(io) {
             contactKey:     String(ticket.id),
             sf_case_id:     sfCaseId,
             sf_case_number: sfCaseNumber,
-          }, ticket.area_id || null);
+          }, (routedTicket || ticket).area_id || null);
         } catch (sfErr) {
           console.warn('⚠️ Salesforce no disponible, ticket local creado:', sfErr.message);
         }

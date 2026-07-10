@@ -22,8 +22,9 @@ function loadAdminRouter(mockDb) {
   return require(adminPath);
 }
 
-async function withServer(mockDb, user, run) {
+async function withServer(mockDb, user, run, io = null) {
   const app = express();
+  if (io) app.set('io', io);
   app.use(express.json());
   app.use((req, res, next) => {
     req.user = user;
@@ -43,6 +44,29 @@ async function withServer(mockDb, user, run) {
     delete require.cache[botFlowPath];
     delete require.cache[dbPath];
   }
+}
+
+function createIo() {
+  const emissions = [];
+  return {
+    emissions,
+    to(room) {
+      const rooms = [room];
+      const chain = {
+        to(nextRoom) {
+          rooms.push(nextRoom);
+          return chain;
+        },
+        emit(event, payload) {
+          emissions.push({ rooms: [...rooms], event, payload });
+        },
+      };
+      return chain;
+    },
+    emit(event, payload) {
+      emissions.push({ rooms: ['*'], event, payload });
+    },
+  };
 }
 
 async function request(baseUrl, method, pathname, body) {
@@ -84,6 +108,15 @@ function createMockDb(overrides = {}) {
     updateAnalyst: async (id, payload) => ({ id, ...payload }),
     listAuditLogs: async () => [],
     logAudit: async () => ({ id: 1 }),
+    getTicketsWithRouting: async () => [],
+    getTicketById: async id => ({ id, area_id: 2, status: 'open', created_at: '2026-07-09T10:00:00.000Z' }),
+    getTicketWithRouting: async id => ({ id, area_id: 2, status: 'open', created_at: '2026-07-09T10:00:00.000Z', area: { id: 2, name: 'Support', sla_minutes: 30 }, assignment: { ticket_id: id, analyst_id: 7, analyst: { id: 7, display_name: 'Ada', area_id: 2 } } }),
+    getAreaById: async id => ({ id, name: `Area ${id}`, active: true }),
+    getAnalystById: async id => ({ id, area_id: 2, display_name: 'Ada', available: true }),
+    assignTicket: async (ticketId, analystId) => ({ ticket_id: ticketId, analyst_id: analystId }),
+    unassignTicket: async ticketId => ({ ticket_id: ticketId, analyst_id: null }),
+    updateTicketArea: async (ticketId, areaId) => ({ id: ticketId, area_id: areaId }),
+    listAvailableAnalystsByArea: async areaId => [{ id: 7, area_id: areaId, display_name: 'Ada', available: true }],
     listActiveBotFlows: async () => [{ id: 1, step_key: 'initial_filter', version_id: 1, area_id: null }],
     ...overrides,
   };
@@ -219,6 +252,84 @@ test('/api/admin returns 500 when audit listing rejects', async () => {
     assert.equal(res.status, 500);
     assert.deepEqual(res.body, { error: 'audit unavailable' });
   });
+});
+
+test('/api/admin queue returns SLA-enriched tickets', async () => {
+  await withServer(createMockDb({
+    getTicketsWithRouting: async () => [{ id: 20, area_id: 2, status: 'open', created_at: '2026-07-09T10:00:00.000Z', area: { id: 2, name: 'Support', sla_minutes: 30 } }],
+  }), { role: 'admin', name: 'Admin' }, async (baseUrl) => {
+    const res = await request(baseUrl, 'GET', '/api/admin/queue');
+
+    assert.equal(res.status, 200);
+    assert.equal(res.body.tickets[0].id, 20);
+    assert.ok(res.body.tickets[0].sla.due_at);
+  });
+});
+
+test('/api/admin assigns tickets and writes audit logs', async () => {
+  const audits = [];
+  await withServer(createMockDb({ logAudit: async payload => { audits.push(payload); return { id: 1 }; } }), { role: 'admin', name: 'Root' }, async (baseUrl) => {
+    const res = await request(baseUrl, 'POST', '/api/admin/tickets/20/assign', { analyst_id: 7 });
+
+    assert.equal(res.status, 200);
+    assert.equal(res.body.assignment.analyst_id, 7);
+    assert.equal(audits[0].action, 'ticket.assigned');
+  });
+});
+
+test('/api/admin REST assignment emits scoped routing updates', async () => {
+  const io = createIo();
+
+  await withServer(createMockDb(), { role: 'admin', name: 'Root' }, async (baseUrl) => {
+    const res = await request(baseUrl, 'POST', '/api/admin/tickets/20/assign', { analyst_id: 7 });
+
+    assert.equal(res.status, 200);
+    assert.deepEqual(io.emissions.map(item => ({ rooms: item.rooms, event: item.event })), [
+      { rooms: ['admin', 'area:2'], event: 'ticket-assigned' },
+      { rooms: ['admin', 'area:2'], event: 'queue-updated' },
+      { rooms: ['analyst:7'], event: 'ticket-assigned' },
+      { rooms: ['admin', 'area:2'], event: 'sla-alert' },
+    ]);
+  }, io);
+});
+
+test('/api/admin rejects assignment to analysts outside ticket area', async () => {
+  await withServer(createMockDb({ getAnalystById: async id => ({ id, area_id: 9, display_name: 'Wrong area' }) }), { role: 'admin', name: 'Admin' }, async (baseUrl) => {
+    const res = await request(baseUrl, 'POST', '/api/admin/tickets/20/assign', { analyst_id: 9 });
+
+    assert.equal(res.status, 409);
+    assert.match(res.body.error, /does not belong/);
+  });
+});
+
+test('/api/admin rejects assignment to null-area analysts for area tickets', async () => {
+  await withServer(createMockDb({ getAnalystById: async id => ({ id, area_id: null, display_name: 'No area' }) }), { role: 'admin', name: 'Admin' }, async (baseUrl) => {
+    const res = await request(baseUrl, 'POST', '/api/admin/tickets/20/assign', { analyst_id: 11 });
+
+    assert.equal(res.status, 409);
+    assert.match(res.body.error, /does not belong/);
+  });
+});
+
+test('/api/admin transfer emits old-area and new-area routing updates', async () => {
+  const io = createIo();
+
+  await withServer(createMockDb({
+    getTicketById: async id => ({ id, area_id: 1, status: 'open', created_at: '2026-07-09T10:00:00.000Z' }),
+    getTicketWithRouting: async id => ({ id, area_id: 2, status: 'open', created_at: '2026-07-09T10:00:00.000Z', area: { id: 2, name: 'Support', sla_minutes: 30 }, assignment: { ticket_id: id, analyst_id: 7, analyst: { id: 7, display_name: 'Ada', area_id: 2 } } }),
+  }), { role: 'admin', name: 'Root' }, async (baseUrl) => {
+    const res = await request(baseUrl, 'POST', '/api/admin/tickets/20/transfer', { area_id: 2, analyst_id: 7 });
+
+    assert.equal(res.status, 200);
+    assert.deepEqual(io.emissions.map(item => ({ rooms: item.rooms, event: item.event })), [
+      { rooms: ['admin', 'area:1'], event: 'ticket-assigned' },
+      { rooms: ['admin', 'area:1'], event: 'queue-updated' },
+      { rooms: ['admin', 'area:2'], event: 'ticket-assigned' },
+      { rooms: ['admin', 'area:2'], event: 'queue-updated' },
+      { rooms: ['analyst:7'], event: 'ticket-assigned' },
+      { rooms: ['admin', 'area:2'], event: 'sla-alert' },
+    ]);
+  }, io);
 });
 
 test('/api/admin allows admins to list bot flows and cache status', async () => {

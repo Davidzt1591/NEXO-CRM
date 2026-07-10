@@ -126,6 +126,94 @@ async function getTicketWithAssignment(id) {
   return ticket;
 }
 
+async function getTicketWithRouting(id) {
+  const { data, error } = await supabase
+    .from('tickets')
+    .select('*, area:areas(*), ticket_assignments(*, analyst:analysts(*))')
+    .eq('id', id)
+    .single();
+
+  if (error) {
+    console.error(`❌ Error Supabase al buscar ticket enriquecido #${id}:`, error.message);
+    return null;
+  }
+
+  return {
+    ...data,
+    assignment: Array.isArray(data.ticket_assignments) ? data.ticket_assignments[0] || null : data.ticket_assignments || null,
+  };
+}
+
+async function getTicketsWithRouting() {
+  const { data, error } = await supabase
+    .from('tickets')
+    .select('*, area:areas(*), ticket_assignments(*, analyst:analysts(*))')
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    console.error('❌ Error Supabase al listar tickets enriquecidos:', error.message);
+    return [];
+  }
+
+  return (data || []).map(ticket => ({
+    ...ticket,
+    assignment: Array.isArray(ticket.ticket_assignments) ? ticket.ticket_assignments[0] || null : ticket.ticket_assignments || null,
+  }));
+}
+
+async function assignTicket(ticketId, analystId, { assigned_by = 'manual' } = {}) {
+  const { data, error } = await supabase
+    .from('ticket_assignments')
+    .upsert({
+      ticket_id: ticketId,
+      analyst_id: analystId,
+      assigned_at: new Date().toISOString(),
+      assigned_by,
+    }, { onConflict: 'ticket_id' })
+    .select()
+    .single();
+
+  if (error) {
+    console.error(`❌ Error Supabase al asignar ticket #${ticketId}:`, error.message);
+    throw error;
+  }
+  return data;
+}
+
+async function unassignTicket(ticketId, { assigned_by = 'manual' } = {}) {
+  const { data, error } = await supabase
+    .from('ticket_assignments')
+    .upsert({
+      ticket_id: ticketId,
+      analyst_id: null,
+      assigned_at: new Date().toISOString(),
+      assigned_by,
+    }, { onConflict: 'ticket_id' })
+    .select()
+    .single();
+
+  if (error) {
+    console.error(`❌ Error Supabase al desasignar ticket #${ticketId}:`, error.message);
+    throw error;
+  }
+  return data;
+}
+
+async function updateTicketArea(ticketId, areaId) {
+  const { data, error } = await supabase
+    .from('tickets')
+    .update({ area_id: areaId || null })
+    .eq('id', ticketId)
+    .select()
+    .single();
+
+  if (error) {
+    console.error(`❌ Error Supabase al actualizar área de ticket #${ticketId}:`, error.message);
+    throw error;
+  }
+  return data;
+}
+
 async function listTicketAssignments() {
   const { data, error } = await supabase
     .from('ticket_assignments')
@@ -370,6 +458,20 @@ async function listAreas({ includeInactive = true } = {}) {
   return data || [];
 }
 
+async function getAreaById(id) {
+  const { data, error } = await supabase
+    .from('areas')
+    .select('*')
+    .eq('id', id)
+    .maybeSingle();
+
+  if (error) {
+    console.error(`❌ Error Supabase al buscar área #${id}:`, error.message);
+    return null;
+  }
+  return data;
+}
+
 async function createArea({ name, description, welcome_msg, active = true, sla_minutes = 30 }) {
   const payload = {
     name,
@@ -421,6 +523,35 @@ async function listAnalysts() {
 
   if (error) {
     console.error('❌ Error Supabase al listar analistas:', error.message);
+    throw error;
+  }
+  return data || [];
+}
+
+async function getAnalystById(id) {
+  const { data, error } = await supabase
+    .from('analysts')
+    .select('*, area:areas(*), token:dashboard_tokens(id, name, role, active)')
+    .eq('id', id)
+    .maybeSingle();
+
+  if (error) {
+    console.error(`❌ Error Supabase al buscar analista #${id}:`, error.message);
+    return null;
+  }
+  return data;
+}
+
+async function listAvailableAnalystsByArea(areaId) {
+  const { data, error } = await supabase
+    .from('analysts')
+    .select('*, area:areas(*)')
+    .eq('area_id', areaId)
+    .eq('available', true)
+    .order('id', { ascending: true });
+
+  if (error) {
+    console.error(`❌ Error Supabase al listar analistas disponibles para área #${areaId}:`, error.message);
     throw error;
   }
   return data || [];
@@ -569,6 +700,11 @@ module.exports = {
   getTicketById,
   getTicketAssignment,
   getTicketWithAssignment,
+  getTicketWithRouting,
+  getTicketsWithRouting,
+  assignTicket,
+  unassignTicket,
+  updateTicketArea,
   listTicketAssignments,
   deleteTicket,
   // Messages
@@ -591,9 +727,12 @@ module.exports = {
   revokeToken,
   // Admin
   listAreas,
+  getAreaById,
   createArea,
   updateArea,
   listAnalysts,
+  getAnalystById,
+  listAvailableAnalystsByArea,
   createAnalyst,
   updateAnalyst,
   getAnalystByTokenId,

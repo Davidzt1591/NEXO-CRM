@@ -2,6 +2,7 @@ const store = require('./store');
 const db    = require('./database/db');
 const whatsappAdapter = require('./services/whatsapp');
 const { canAccessTicket, filterTicketsForPrincipal, isAdmin, emitOperational } = require('./realtime/operational');
+const routing = require('./services/routing');
 
 async function resolveTicketArea(ticketId) {
   if (!ticketId) return null;
@@ -53,6 +54,29 @@ function requireAdminSocket(socket, errorEvent = 'auth-error') {
   return false;
 }
 
+function emitRoutingUpdate(io, ticket, { previousAreaId = null } = {}) {
+  if (!ticket) return;
+  if (previousAreaId && String(previousAreaId) !== String(ticket.area_id || '')) {
+    emitOperational(io, 'ticket-assigned', ticket, previousAreaId);
+    emitOperational(io, 'queue-updated', { ticket }, previousAreaId);
+  }
+  emitOperational(io, 'ticket-assigned', ticket, ticket.area_id || null);
+  emitOperational(io, 'queue-updated', { ticket }, ticket.area_id || null);
+  if (ticket.assignment?.analyst_id) {
+    io.to(`analyst:${ticket.assignment.analyst_id}`).emit('ticket-assigned', ticket);
+  }
+  if (ticket.sla?.state === 'warning' || ticket.sla?.state === 'breached') {
+    emitOperational(io, 'sla-alert', { ticketId: ticket.id, sla: ticket.sla }, ticket.area_id || null);
+  }
+}
+
+function canSelfAssignTicket(socket, ticket) {
+  const analystId = socket.analyst?.id;
+  if (!analystId || !ticket) return false;
+  const assignedAnalystId = ticket.assignment?.analyst_id;
+  return !assignedAnalystId || String(assignedAnalystId) === String(analystId);
+}
+
 function emitInitialWhatsAppAuthState(socket) {
   if (!isAdmin(socket.user)) return;
 
@@ -101,6 +125,7 @@ function setupSockets(io, client, borrarSesion) {
       if (analyst?.id) socket.join(`analyst:${analyst.id}`);
       if (analyst?.area_id) socket.join(`area:${analyst.area_id}`);
       socket.analyst = analyst;
+      socket.emit('principal-info', { user: socket.user, analyst });
     } catch (err) {
       console.warn('⚠️  No se pudo resolver sala de analista:', err.message);
     }
@@ -296,22 +321,69 @@ function setupSockets(io, client, borrarSesion) {
     // Load tickets
     socket.on('get-tickets', async () => {
       try {
-        const tickets = await db.getTickets();
+        const tickets = routing.enrichTickets(await db.getTicketsWithRouting());
         if (isAdmin(socket.user)) {
           socket.emit('tickets-list', tickets);
           return;
         }
 
-        const assignments = await db.listTicketAssignments();
-        const assignmentsByTicketId = new Map(assignments.map(item => [String(item.ticket_id), item]));
-        const scopedTickets = tickets.map(ticket => ({
-          ...ticket,
-          assignment: assignmentsByTicketId.get(String(ticket.id)) || null,
-        }));
-        socket.emit('tickets-list', filterTicketsForPrincipal(scopedTickets, socket.user, socket.analyst));
+        socket.emit('tickets-list', filterTicketsForPrincipal(tickets, socket.user, socket.analyst));
       } catch (err) {
         console.error('Error cargando tickets:', err);
         socket.emit('tickets-error', { message: 'No se pudieron cargar los tickets.' });
+      }
+    });
+
+    socket.on('assign-ticket', async ({ ticketId, analystId }) => {
+      try {
+        let targetAnalystId = analystId;
+        if (!isAdmin(socket.user)) {
+          if (!socket.analyst?.id || String(analystId) !== String(socket.analyst.id)) {
+            socket.emit('auth-error', { message: 'No tienes permisos para asignar tickets a otros analistas.' });
+            return;
+          }
+          const authorizedTicket = await requireAuthorizedTicket(socket, ticketId);
+          if (!authorizedTicket) return;
+          if (!canSelfAssignTicket(socket, authorizedTicket)) {
+            socket.emit('assignment-error', { message: 'No puedes tomar un ticket asignado a otro analista.' });
+            return;
+          }
+          targetAnalystId = socket.analyst.id;
+        }
+
+        const ticket = await routing.assignTicket(db, {
+          ticketId,
+          analystId: targetAnalystId,
+          assignedBy: isAdmin(socket.user) ? 'manual' : 'self',
+          actor: socket.user,
+        });
+        emitRoutingUpdate(io, ticket);
+      } catch (err) {
+        console.error('Error asignando ticket:', err.message);
+        socket.emit('assignment-error', { message: err.message || 'No se pudo asignar el ticket.' });
+      }
+    });
+
+    socket.on('transfer-ticket', async ({ ticketId, areaId, analystId }) => {
+      if (!requireAdminSocket(socket, 'assignment-error')) return;
+      try {
+        const previousTicket = await db.getTicketById(ticketId);
+        const ticket = await routing.transferTicket(db, { ticketId, areaId, analystId, actor: socket.user });
+        emitRoutingUpdate(io, ticket, { previousAreaId: previousTicket?.area_id || null });
+      } catch (err) {
+        console.error('Error transfiriendo ticket:', err.message);
+        socket.emit('assignment-error', { message: err.message || 'No se pudo transferir el ticket.' });
+      }
+    });
+
+    socket.on('unassign-ticket', async ({ ticketId }) => {
+      if (!requireAdminSocket(socket, 'assignment-error')) return;
+      try {
+        const ticket = await routing.unassignTicket(db, ticketId, { assignedBy: 'manual' });
+        emitRoutingUpdate(io, ticket);
+      } catch (err) {
+        console.error('Error desasignando ticket:', err.message);
+        socket.emit('assignment-error', { message: err.message || 'No se pudo desasignar el ticket.' });
       }
     });
 
@@ -472,4 +544,4 @@ function setupSockets(io, client, borrarSesion) {
   });
 }
 
-module.exports = { setupSockets, emitInitialWhatsAppAuthState, emitAdminOperation, emitAdminChatOperation };
+module.exports = { setupSockets, canSelfAssignTicket, emitInitialWhatsAppAuthState, emitAdminOperation, emitAdminChatOperation, emitRoutingUpdate };
