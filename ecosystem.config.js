@@ -1,14 +1,44 @@
+const enableBackendWatch = process.env.PM2_WATCH_BACKEND === 'true';
+const useSystemCa = process.env.PM2_USE_SYSTEM_CA === 'true';
+
 module.exports = {
   apps: [
     {
       name: 'nexo-backend',
       script: 'server.js',
       cwd: './backend',
+      node_args: useSystemCa ? ['--use-system-ca'] : [],
       instances: 1,
       autorestart: true,
+      watch: enableBackendWatch ? ['server.js', 'src', 'scripts'] : false,
+      ignore_watch: [
+        'node_modules',
+        'logs',
+        'data',
+        '.wwebjs_auth',
+        '.wwebjs_cache',
+        'backend-runtime.err.log',
+        'backend-runtime.out.log',
+        'pairing_err.txt',
+        'pairing_error.log',
+        'test',
+      ],
+      watch_delay: 1000,
       max_memory_restart: '500M',
       env: {
-        NODE_ENV: 'development'
+        NODE_ENV: 'development',
+        PM2_WATCH_BACKEND: 'false',
+        PM2_USE_SYSTEM_CA: 'false',
+      },
+      env_development: {
+        NODE_ENV: 'development',
+        PM2_WATCH_BACKEND: 'true',
+        PM2_USE_SYSTEM_CA: 'true',
+      },
+      env_production: {
+        NODE_ENV: 'production',
+        PM2_WATCH_BACKEND: 'false',
+        PM2_USE_SYSTEM_CA: 'false',
       },
       error_file: './logs/pm2-error.log',
       out_file: './logs/pm2-out.log',

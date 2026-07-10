@@ -1,4 +1,4 @@
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || (import.meta.env.DEV ? 'http://localhost:3001' : '');
 const NON_JSON_API_ERROR = 'No se pudo conectar con la API del backend. La respuesta no fue JSON.';
 const INVALID_JSON_API_ERROR = 'La API respondió con JSON inválido. Intenta de nuevo y revisa la respuesta del backend si el problema continúa.';
 
@@ -8,7 +8,7 @@ export function getAuthToken() {
 
 function isTrustedApiPath(path) {
   try {
-    const requestUrl = new URL(`${API_BASE_URL}${path}`, window.location.origin);
+    const requestUrl = new URL(resolveApiUrl(path), window.location.origin);
     const backendUrl = API_BASE_URL ? new URL(API_BASE_URL, window.location.origin) : null;
 
     return (
@@ -21,6 +21,14 @@ function isTrustedApiPath(path) {
   }
 }
 
+function resolveApiUrl(path) {
+  try {
+    return new URL(path).toString();
+  } catch {
+    return `${API_BASE_URL}${path}`;
+  }
+}
+
 function responseMetadata(response, contentType, text) {
   return {
     status: response.status,
@@ -30,7 +38,7 @@ function responseMetadata(response, contentType, text) {
 }
 
 function buildNonJsonMessage(path, response, contentType) {
-  return `${NON_JSON_API_ERROR} Endpoint: ${path}. Estado: ${response.status}. Tipo recibido: ${contentType || 'sin content-type'}. Verifica que estés entrando por el puerto de Vite activo y que /api esté proxyando a http://localhost:3001.`;
+  return `${NON_JSON_API_ERROR} Endpoint: ${path}. Estado: ${response.status}. Tipo recibido: ${contentType || 'sin content-type'}. Verifica que el backend esté activo en http://localhost:3001 o configura VITE_API_BASE_URL.`;
 }
 
 function createApiError(message, response, contentType, text, data = null) {
@@ -51,7 +59,7 @@ export async function apiRequest(path, options = {}) {
     headers.set('Content-Type', 'application/json');
   }
 
-  const response = await fetch(`${API_BASE_URL}${path}`, {
+  const response = await fetch(resolveApiUrl(path), {
     ...options,
     headers,
   });

@@ -52,10 +52,10 @@ describe('apiRequest', () => {
     expect(options.body).toBe(JSON.stringify({ name: 'Billing' }));
   });
 
-  it('uses relative /api requests by default so Vite can proxy them in development', async () => {
+  it('targets the backend directly in development instead of depending on the frontend port', async () => {
     await apiRequest('/api/admin/areas');
 
-    expect(fetch).toHaveBeenCalledWith('/api/admin/areas', expect.objectContaining({
+    expect(fetch).toHaveBeenCalledWith('http://localhost:3001/api/admin/areas', expect.objectContaining({
       headers: expect.any(Headers),
     }));
   });
