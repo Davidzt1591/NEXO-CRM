@@ -29,6 +29,7 @@ const jwt = require('jsonwebtoken');
 const fs = require('fs');
 const path = require('path');
 const { ALLOWED_MIMETYPES, hasMagicBytes, normalizeBase64, sanitizeFilename } = require('./mediaValidation');
+const { redactForLog, redactTextForLog } = require('../utils/redact');
 
 const DEFAULT_PRIVATE_KEY_PATH = path.resolve(__dirname, '..', '..', 'certs', 'salesforce.key');
 
@@ -51,6 +52,18 @@ function resolveSalesforcePrivateKey(env = process.env, fsModule = fs) {
   }
 
   return null;
+}
+
+function buildSafeSalesforceErrorMessage(status, body) {
+  const redactedBody = redactForLog(body);
+  const msg = Array.isArray(redactedBody)
+    ? redactedBody[0]?.message
+    : (redactedBody?.message || JSON.stringify(redactedBody));
+  const fields = Array.isArray(redactedBody)
+    ? redactedBody.map(e => e.fields?.join(', ')).filter(Boolean).join(', ')
+    : '';
+
+  return `SF API ${status}: ${msg || 'Salesforce request failed.'}${fields ? ` [Campos: ${fields}]` : ''}`;
 }
 
 async function getToken(force = false) {
@@ -98,7 +111,7 @@ async function getToken(force = false) {
       console.log('🔑 JWT Bearer token obtenido de Salesforce exitosamente.');
     } else {
       const err = await res.text();
-      console.warn(`⚠️  Falló autenticación JWT (${res.status}): ${err}. Reintentando con credenciales básicas...`);
+      console.warn(`⚠️  Falló autenticación JWT (${res.status}): ${redactTextForLog(err)}. Reintentando con credenciales básicas...`);
     }
   }
 
@@ -122,7 +135,7 @@ async function getToken(force = false) {
 
     if (!res.ok) {
       const err = await res.text();
-      throw new Error(`SF Auth Error (${res.status}): ${err}`);
+      throw new Error(`SF Auth Error (${res.status}): ${redactTextForLog(err)}`);
     }
 
     const data = await res.json();
@@ -191,13 +204,11 @@ async function sfRequest(method, path, body = null, extraHeaders = {}, isRetry =
   if (!text) return null;
 
   let json;
-  try { json = JSON.parse(text); } catch { throw new Error(`SF respuesta inválida: ${text.slice(0, 200)}`); }
+  try { json = JSON.parse(text); } catch { throw new Error(`SF respuesta inválida: ${redactTextForLog(text.slice(0, 200))}`); }
 
   if (!res.ok) {
-    console.error('❌ SF Error Response:', JSON.stringify(json, null, 2));
-    const msg = Array.isArray(json) ? json[0]?.message : (json.message || JSON.stringify(json));
-    const fields = Array.isArray(json) ? json.map(e => e.fields?.join(', ')).filter(Boolean).join(', ') : '';
-    throw new Error(`SF API ${res.status}: ${msg}${fields ? ` [Campos: ${fields}]` : ''}`);
+    console.error('❌ SF Error Response:', JSON.stringify(redactForLog(json), null, 2));
+    throw new Error(buildSafeSalesforceErrorMessage(res.status, json));
   }
 
   return json;
@@ -265,7 +276,7 @@ async function crearCase(payload) {
     }
   });
 
-  console.log('📤 Payload a enviar:', JSON.stringify(casePayload, null, 2));
+  console.log('📤 Payload a enviar:', JSON.stringify(redactForLog(casePayload), null, 2));
 
   const created = await sfRequest('POST', '/sobjects/Case', casePayload, AUTO_ASSIGN_HEADER);
 
@@ -539,6 +550,7 @@ module.exports = {
   asignarmeCase,
   buscarCuentas,
   normalizeAccountSearchText,
+  buildSafeSalesforceErrorMessage,
   __setTokenCacheForTests,
   __resetCachesForTests,
 };

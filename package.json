@@ -6,6 +6,12 @@
   "scripts": {
     "start": "node server.js",
     "dev:backend": "cd backend && nodemon server.js",
+    "diagnose": "node scripts/diagnose-nexo.js",
+    "test:focused": "node scripts/check-focused-tests.js",
+    "test:diagnose": "node --test scripts/*.test.js",
+    "test:backend": "npm --prefix backend test",
+    "test:frontend": "npm --prefix frontend test",
+    "verify": "npm run test:focused && npm run test:diagnose && npm run test:backend && npm run test:frontend",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [

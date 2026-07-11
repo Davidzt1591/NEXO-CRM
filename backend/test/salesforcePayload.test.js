@@ -68,6 +68,39 @@ test('createCaseComment builds private CaseComment payload', async (t) => {
   assert.deepEqual(result, { id: '00axx000001', success: true });
 });
 
+test('Salesforce API errors are redacted before being thrown or logged', async (t) => {
+  salesforce.__setTokenCacheForTests({ accessToken: 'mock-token' });
+  const originalFetch = global.fetch;
+  const originalError = console.error;
+  const errorLogs = [];
+  const rawMessage = 'Validation failed for person@example.com token=raw-token phone +57 300 123 4567';
+
+  global.fetch = async () => response(400, [{ message: rawMessage, fields: ['SuppliedEmail'] }]);
+  console.error = (...args) => { errorLogs.push(args.join(' ')); };
+  t.after(() => {
+    global.fetch = originalFetch;
+    console.error = originalError;
+    salesforce.__resetCachesForTests();
+  });
+
+  await assert.rejects(
+    salesforce.createCaseComment('500xx000001', 'internal transcript'),
+    err => {
+      assert.doesNotMatch(err.message, /person@example\.com/);
+      assert.doesNotMatch(err.message, /raw-token/);
+      assert.doesNotMatch(err.message, /300 123 4567/);
+      assert.match(err.message, /\[REDACTED\]/);
+      return true;
+    }
+  );
+
+  const logText = errorLogs.join('\n');
+  assert.doesNotMatch(logText, /person@example\.com/);
+  assert.doesNotMatch(logText, /raw-token/);
+  assert.doesNotMatch(logText, /300 123 4567/);
+  assert.match(logText, /\[REDACTED\]/);
+});
+
 test('normalizeAccountSearchText rejects SOQL injection-like characters and length', () => {
   assert.equal(salesforce.normalizeAccountSearchText('  ACME   Colombia-1  '), 'ACME Colombia-1');
   assert.throws(() => salesforce.normalizeAccountSearchText('ACME_1'), /unsupported characters/);

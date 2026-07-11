@@ -9,17 +9,18 @@ const globalLogs = [];
 const origLog = console.log;
 const origError = console.error;
 const origWarn = console.warn;
+const { redactLogArgs, safeStringifyForLog, redactTextForLog } = require('./src/utils/redact');
 function addLog(type, args) {
   const msg = Array.from(args)
-    .map(a => typeof a === 'object' ? JSON.stringify(a) : String(a))
+    .map(a => typeof a === 'object' ? safeStringifyForLog(a) : redactTextForLog(a))
     .join(' ')
     .replace(/(pairing-code|pairing code|c[oó]digo de emparejamiento|qr)([^\n]{0,40})([A-Za-z0-9+/=_-]{6,})/gi, '$1$2[REDACTED]');
   globalLogs.push({ ts: new Date().toISOString(), type, msg });
   if (globalLogs.length > 200) globalLogs.shift(); // Max 200 logs
 }
-console.log = (...args) => { addLog('INFO', args); origLog(...args); };
-console.error = (...args) => { addLog('ERROR', args); origError(...args); };
-console.warn = (...args) => { addLog('WARN', args); origWarn(...args); };
+console.log = (...args) => { const safeArgs = redactLogArgs(args); addLog('INFO', safeArgs); origLog(...safeArgs); };
+console.error = (...args) => { const safeArgs = redactLogArgs(args); addLog('ERROR', safeArgs); origError(...safeArgs); };
+console.warn = (...args) => { const safeArgs = redactLogArgs(args); addLog('WARN', safeArgs); origWarn(...safeArgs); };
 const { initWhatsApp: setupWhatsApp } = require('./src/services/whatsapp');
 const { setupSockets } = require('./src/socket');
 
@@ -49,34 +50,8 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
 });
 
-const { validateToken } = require('./src/database/db');
+const apiAuth = require('./src/middleware/apiAuth');
 const adminOnly = require('./src/middleware/adminOnly');
-
-// Auth middleware for API routes
-const apiAuth = async (req, res, next) => {
-  let token = req.headers['authorization'];
-  if (token && token.startsWith('Bearer ')) {
-    token = token.slice(7);
-  } else {
-    token = req.query.token;
-  }
-
-  if (!token) {
-    return res.status(401).json({ error: 'Acceso no autorizado. Token ausente.' });
-  }
-
-  try {
-    const user = await validateToken(token);
-    if (!user) {
-      return res.status(401).json({ error: 'Acceso no autorizado. Token inválido o revocado.' });
-    }
-
-    req.user = user; // Attach user metadata to request object
-    next();
-  } catch (err) {
-    return res.status(500).json({ error: 'Error de comunicación con la base de datos de seguridad.' });
-  }
-};
 
 // Enforce auth on all API sub-routes
 app.use('/api', apiAuth);

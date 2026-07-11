@@ -309,6 +309,37 @@ test('Salesforce case create requires ticket_id before Salesforce call', async (
   });
 });
 
+test('Salesforce route redacts upstream error text before returning or logging it', async (t) => {
+  const originalError = console.error;
+  const errorLogs = [];
+  const rawMessage = 'Salesforce failed for person@example.com token=raw-token phone +57 300 123 4567';
+  console.error = (...args) => { errorLogs.push(args.join(' ')); };
+  t.after(() => { console.error = originalError; });
+
+  const mockDb = {
+    getTicketWithAssignment: async id => ({ id, area_id: 2, assignment: null }),
+    getAnalystByTokenId: async () => null,
+  };
+  const mockSf = {
+    crearCase: async () => { throw new Error(rawMessage); },
+  };
+
+  await withServer({ mockDb, mockSf, mockClose: { validateSalesforceCloseFields, closeTicket: async () => null }, user: { id: 1, role: 'admin', name: 'Admin' } }, async baseUrl => {
+    const res = await postJson(baseUrl, '/api/sf/cases', { ticket_id: 7, Subject: 'New case' });
+    assert.equal(res.status, 500);
+    assert.doesNotMatch(res.body.error, /person@example\.com/);
+    assert.doesNotMatch(res.body.error, /raw-token/);
+    assert.doesNotMatch(res.body.error, /300 123 4567/);
+    assert.match(res.body.error, /\[REDACTED\]/);
+  });
+
+  const logText = errorLogs.join('\n');
+  assert.doesNotMatch(logText, /person@example\.com/);
+  assert.doesNotMatch(logText, /raw-token/);
+  assert.doesNotMatch(logText, /300 123 4567/);
+  assert.match(logText, /\[REDACTED\]/);
+});
+
 test('Salesforce case create rejects unauthorized analyst before Salesforce call', async () => {
   let sfCalled = false;
   const mockDb = {

@@ -8,12 +8,14 @@ const sf      = require('../services/salesforce');
 const ticketClose = require('../services/ticketClose');
 const db = require('../database/db');
 const { canAccessTicket } = require('../realtime/operational');
+const { redactTextForLog } = require('../utils/redact');
 
 // Helper to wrap async route handlers
 const asyncHandler = fn => (req, res) =>
   fn(req, res).catch(e => {
-    console.error('SF Route Error:', e.message);
-    res.status(e.statusCode || 500).json({ error: e.message, code: e.code });
+    const safeMessage = redactTextForLog(e.message || 'Unexpected Salesforce route error.');
+    console.error('SF Route Error:', safeMessage);
+    res.status(e.statusCode || 500).json({ error: safeMessage, code: e.code });
   });
 
 async function requireTicketAccess(req, ticketId) {
@@ -70,7 +72,7 @@ async function bindCreatedCaseToTicket(ticketId, result) {
       sf_case_number: result.CaseNumber || null,
     });
   } catch (cause) {
-    console.error('SF Case local binding failed:', cause.message);
+    console.error('SF Case local binding failed:', redactTextForLog(cause.message));
     const err = new Error('Salesforce Case was created, but local ticket binding failed. Please retry or contact support.');
     err.statusCode = 502;
     err.code = 'SF_CASE_BIND_FAILED';
