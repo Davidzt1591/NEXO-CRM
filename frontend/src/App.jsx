@@ -1,6 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { io } from 'socket.io-client';
-import QRCode from 'qrcode';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useAppStore } from './store/useAppStore';
 import EmojiPicker from 'emoji-picker-react';
 import { 
@@ -12,16 +10,8 @@ import './App.css';
 import SalesforceCaseModal from './components/SalesforceCaseModal';
 import AdminPanel from './components/AdminPanel';
 import { apiRequest } from './lib/apiClient';
-
-const socket = io('http://localhost:3001', {
-  transports: ['websocket'],
-  autoConnect: false, // Let the app connect explicitly after token check
-  auth: (cb) => {
-    cb({ token: localStorage.getItem('nexo_token') });
-  },
-  reconnectionAttempts: 10,
-  reconnectionDelay: 1500,
-});
+import { socket } from './lib/nexoSocket';
+import { useNexoSocket } from './hooks/useNexoSocket';
 
 // ─────────────────────────────────────────────
 // Utils
@@ -448,7 +438,7 @@ export default function App() {
     }
   };
 
-  const selectedMessages = chatMessages[selectedId] || [];
+  const selectedMessages = useMemo(() => chatMessages[selectedId] || [], [chatMessages, selectedId]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -458,12 +448,12 @@ export default function App() {
   const [authError, setAuthError] = useState(null);
   const [isAuthenticated, setIsAuthenticated] = useState(!!localStorage.getItem('nexo_token'));
 
-  const handleLogout = () => {
+  const handleLogout = useCallback(() => {
     localStorage.removeItem('nexo_token');
     setIsAuthenticated(false);
     setSystemInfo(null);
     socket.disconnect();
-  };
+  }, []);
 
   const handleLogin = (e) => {
     e.preventDefault();
@@ -473,248 +463,51 @@ export default function App() {
     setIsAuthenticated(true);
   };
 
-  // Socket setup — runs when authenticated
-  useEffect(() => {
-    if (!isAuthenticated) {
-      socket.disconnect();
-      return;
-    }
+  const socketOptions = useMemo(() => ({
+    qrTimerRef,
+    selectedIdRef,
+    setAuthError,
+    setAuthMode,
+    setBotActivo,
+    setBotStatus,
+    setChatMessages,
+    setChatModes,
+    setChatSummaries,
+    setContacts,
+    setIsAuthenticated,
+    setIsImprovingText,
+    setIsSummarizing,
+    setNewMessage,
+    setPairingCode,
+    setPairingError,
+    setPairingLoading,
+    setPrincipal,
+    setQrCountdown,
+    setQrDataUrl,
+    setSelectedId,
+    setSilenced,
+    setStats,
+    setSystemInfo,
+    setUnread,
+  }), [
+    setAuthMode,
+    setBotActivo,
+    setBotStatus,
+    setChatMessages,
+    setChatModes,
+    setContacts,
+    setNewMessage,
+    setPairingCode,
+    setPairingError,
+    setPairingLoading,
+    setQrCountdown,
+    setQrDataUrl,
+    setSelectedId,
+    setSilenced,
+    setUnread,
+  ]);
 
-    socket.connect();
-
-    socket.on('connect',    () => setBotStatus('connected'));
-    socket.on('disconnect', () => setBotStatus('disconnected'));
-    
-    socket.on('connect_error', (err) => {
-      console.error('Socket connection error:', err.message);
-      setAuthError('Acceso denegado: Token inválido o revocado.');
-      handleLogout();
-    });
-
-    socket.on('bot-status', ({ status }) => {
-      setBotStatus(status);
-      if (status === 'ready') {
-        setQrDataUrl(null);
-        clearInterval(qrTimerRef.current);
-      }
-    });
-    socket.on('qr', async ({ qr, expiresIn }) => {
-      const url = await QRCode.toDataURL(qr, { width: 280, margin: 2, color: { dark: '#ffffff', light: '#0d0d17' } });
-      setQrDataUrl(url);
-      setQrCountdown(expiresIn);
-
-      clearInterval(qrTimerRef.current);
-      qrTimerRef.current = setInterval(() => {
-        setQrCountdown(prev => {
-          if (prev <= 1) { clearInterval(qrTimerRef.current); return 0; }
-          return prev - 1;
-        });
-      }, 1000);
-    });
-
-    socket.on('bot-activo', (valor) => setBotActivo(valor));
-    socket.on('principal-info', (info) => setPrincipal(info));
-
-    socket.on('qr-cleared', () => {
-      setQrDataUrl(null);
-      setQrCountdown(0);
-      setPairingCode(null);
-      setPairingError(null);
-      setPairingLoading(false);
-      setAuthMode('qr');
-      clearInterval(qrTimerRef.current);
-    });
-
-    socket.on('pairing-code', ({ code }) => {
-      setPairingCode(code);
-      setPairingError(null);
-      setPairingLoading(false);
-    });
-
-    socket.on('pairing-code-error', ({ message }) => {
-      setPairingError(message);
-      setPairingCode(null);
-      setPairingLoading(false);
-    });
-
-    socket.on('tickets-list', (list) => {
-      setContacts(prev => {
-        const next = { ...prev };
-        list.forEach(t => {
-          if (!t.telefono) return;
-          const key = String(t.id);
-          next[key] = {
-            ...t,
-            chatId:      t.telefono,
-            contactKey:  key,
-            lastMessage:   prev[key]?.lastMessage || t.situacion || '',
-            lastTimestamp: prev[key]?.lastTimestamp || t.created_at,
-          };
-        });
-        return next;
-      });
-
-      // Restaurar mensajes del chat seleccionado al recargar
-      const savedId = localStorage.getItem('nexo_selected_id');
-      if (savedId) {
-        const ticket = list.find(t => String(t.id) === savedId);
-        if (ticket) {
-          socket.emit('get-messages', ticket.id);
-        }
-      }
-    });
-
-    socket.on('system-info', (info) => {
-      setSystemInfo(info);
-    });
-
-    socket.on('ticket-created', (ticket) => {
-      const key = String(ticket.id);
-      setContacts(prev => {
-        const next = { ...prev };
-        // Migrar entrada pre-ticket (keyed by chatId) al nuevo ticketId
-        const old = next[ticket.telefono] || {};
-        delete next[ticket.telefono];
-        next[key] = {
-          ...ticket,
-          chatId:        ticket.telefono,
-          contactKey:    key,
-          lastTimestamp: ticket.created_at || old.lastTimestamp,
-          lastMessage:   old.lastMessage || ticket.situacion || '',
-        };
-        return next;
-      });
-      // Migrar mensajes pre-ticket al nuevo key
-      setChatMessages(prev => {
-        const old = prev[ticket.telefono] || [];
-        if (!old.length && !prev[key]) return prev;
-        const next = { ...prev };
-        delete next[ticket.telefono];
-        next[key] = [...old, ...(next[key] || [])];
-        return next;
-      });
-      // Si estaba viendo la conversación pre-ticket, redirigir al nuevo key
-      setSelectedId(prev => prev === ticket.telefono ? key : prev);
-    });
-
-    socket.on('new-message', ({ chatId, message, from_user, is_bot, timestamp, ticketId, media, waMessageId }) => {
-      const newMsg     = { body: message, from_user, is_bot, timestamp, media: media || null, waMessageId: waMessageId || null };
-      const contactKey = ticketId ? String(ticketId) : chatId;
-
-      setChatMessages(prev => ({
-        ...prev,
-        [contactKey]: [...(prev[contactKey] || []), newMsg]
-      }));
-
-      setContacts(prev => ({
-        ...prev,
-        [contactKey]: {
-          ...(prev[contactKey] || { chatId, contactKey }),
-          chatId,
-          contactKey,
-          lastMessage:   message,
-          lastTimestamp: timestamp,
-        }
-      }));
-
-      if (from_user) {
-        setUnread(prev => {
-          if (contactKey === selectedIdRef.current) return prev;
-          return { ...prev, [contactKey]: (prev[contactKey] || 0) + 1 };
-        });
-      }
-    });
-
-    socket.on('messages-list', (msgs) => {
-      const id = selectedIdRef.current;
-      if (id) setChatMessages(prev => ({ ...prev, [id]: Array.isArray(msgs) ? msgs : [] }));
-    });
-
-    socket.on('message-reaction', ({ waMessageId, emoji }) => {
-      setChatMessages(prev => {
-        const next = { ...prev };
-        for (const id of Object.keys(next)) {
-          next[id] = next[id].map(m => m.waMessageId === waMessageId ? { ...m, reaction: emoji } : m);
-        }
-        return next;
-      });
-    });
-
-    const mergeTicket = (ticket) => {
-      if (!ticket?.id) return;
-      const key = String(ticket.id);
-      setContacts(prev => ({
-        ...prev,
-        [key]: {
-          ...(prev[key] || {}),
-          ...ticket,
-          chatId: ticket.telefono || prev[key]?.chatId,
-          contactKey: key,
-          lastTimestamp: prev[key]?.lastTimestamp || ticket.created_at,
-          lastMessage: prev[key]?.lastMessage || ticket.situacion || '',
-        },
-      }));
-    };
-
-    socket.on('ticket-assigned', mergeTicket);
-    socket.on('queue-updated', ({ ticket }) => mergeTicket(ticket));
-    socket.on('sla-alert', ({ ticketId, sla }) => {
-      const key = String(ticketId);
-      setContacts(prev => prev[key] ? { ...prev, [key]: { ...prev[key], sla } } : prev);
-    });
-
-    socket.on('mode-changed',    ({ chatId, mode }) => setChatModes(prev => ({ ...prev, [chatId]: mode })));
-    socket.on('chat-silenced',   ({ chatId }) => setSilenced(prev => ({ ...prev, [chatId]: true })));
-    socket.on('chat-unsilenced', ({ chatId }) => setSilenced(prev => { const n = { ...prev }; delete n[chatId]; return n; }));
-    socket.on('ticket-closed',   ({ ticketId }) => {
-      const key = String(ticketId);
-      setContacts(prev => {
-        if (!prev[key]) return prev;
-        return { ...prev, [key]: { ...prev[key], status: 'closed' } };
-      });
-    });
-
-    socket.on('summary-ready', ({ ticketId, resumen }) => {
-      setChatSummaries(prev => ({ ...prev, [ticketId]: resumen }));
-      setIsSummarizing(false);
-    });
-    socket.on('summary-error', () => {
-      setIsSummarizing(false);
-      alert('Error al generar resumen con IA.');
-    });
-    socket.on('grammar-ready', ({ improved }) => {
-      setNewMessage(improved);
-      setIsImprovingText(false);
-    });
-
-    socket.on('chat-deleted', ({ contactKey }) => {
-      setContacts(prev => { const next = { ...prev }; delete next[contactKey]; return next; });
-      setChatMessages(prev => { const next = { ...prev }; delete next[contactKey]; return next; });
-      setSelectedId(prev => prev === contactKey ? null : prev);
-    });
-
-    socket.on('sf-case-created', ({ contactKey, sf_case_id, sf_case_number }) => {
-      setContacts(prev => ({
-        ...prev,
-        [contactKey]: {
-          ...prev[contactKey],
-          sf_case_id,
-          sf_case_number,
-        }
-      }));
-    });
-
-    socket.on('stats-data', (data) => {
-      setStats(data);
-    });
-
-    socket.emit('get-tickets');
-
-    return () => {
-      socket.removeAllListeners();
-      clearInterval(qrTimerRef.current);
-    };
-  }, [isAuthenticated]);
+  useNexoSocket({ isAuthenticated, socket, options: socketOptions });
 
   const selectContact = useCallback((contactKey) => {
     setSelectedId(contactKey);
@@ -722,7 +515,7 @@ export default function App() {
     const c = contacts[contactKey];
     if (c?.id) socket.emit('get-messages', c.id);
     setTimeout(() => inputRef.current?.focus(), 50);
-  }, [contacts]);
+  }, [contacts, setSelectedId, setUnread]);
 
   const sendMessage = useCallback(() => {
     if (!selectedId || !selectedContact) return;
@@ -736,7 +529,7 @@ export default function App() {
     setNewMessage('');
     setPendingMedia(null);
     setShowEmojiPicker(false);
-  }, [newMessage, selectedId, selectedContact, pendingMedia]);
+  }, [newMessage, selectedId, selectedContact, pendingMedia, setNewMessage, setPendingMedia, setShowEmojiPicker]);
 
   const handleFileSelect = useCallback((e) => {
     const file = e.target.files?.[0];
@@ -750,13 +543,13 @@ export default function App() {
     };
     reader.readAsDataURL(file);
     e.target.value = '';
-  }, []);
+  }, [setPendingMedia]);
 
   const insertEmoji = useCallback((emoji) => {
     setNewMessage(prev => prev + emoji);
     setShowEmojiPicker(false);
     inputRef.current?.focus();
-  }, []);
+  }, [setNewMessage, setShowEmojiPicker]);
 
   const insertQuickReply = useCallback((text) => {
     setNewMessage(text);
@@ -768,7 +561,7 @@ export default function App() {
         inputRef.current.style.height = Math.min(inputRef.current.scrollHeight, 120) + 'px';
       }
     }, 10);
-  }, []);
+  }, [setNewMessage]);
 
   const handleAddQuickReply = useCallback((data) => {
     setQuickReplies([...quickReplies, { ...data, id: Date.now().toString() }]);
