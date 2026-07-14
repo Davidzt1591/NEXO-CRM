@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import AdminPanel from './AdminPanel';
@@ -144,6 +144,7 @@ describe('AdminPanel', () => {
   beforeEach(() => {
     mockLocalStorage();
     localStorage.setItem('nexo_token', 'admin-token');
+    window.history.replaceState(null, '', '/');
   });
 
   afterEach(() => {
@@ -160,34 +161,131 @@ describe('AdminPanel', () => {
     expect(screen.getByText(/no tiene permisos para ingresar al panel de administración/i)).toBeInTheDocument();
   });
 
-  it('renders the Spanish Phase 4 admin intro, queue, areas, and analysts from successful admin API responses', async () => {
+  it('renders the Spanish Phase 4 admin intro and switches between real admin modules', async () => {
+    const user = userEvent.setup();
     mockAdminFetch();
 
     render(<AdminPanel onLogout={vi.fn()} />);
 
     expect(await screen.findByText('Panel de administración')).toBeInTheDocument();
+    expect(screen.getByText('Módulo activo')).toBeInTheDocument();
     expect(screen.getByText(/Cola híbrida con asignación manual/i)).toBeInTheDocument();
     expect(screen.getByText(/La asignación automática solo aplica a tickets con área definida/i)).toBeInTheDocument();
+    expect(screen.queryByText('Tickets actuales')).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /cola y sla/i }));
     expect(screen.getByText('Tickets actuales')).toBeInTheDocument();
+    expect(screen.getByText('Acme')).toBeInTheDocument();
+    expect(screen.getByText(/Por vencer/i)).toBeInTheDocument();
+    expect(within(screen.getByLabelText('Asignar ticket #33')).queryByRole('option', { name: /No Area Analyst/i })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /reportes/i }));
     expect(screen.getByText('Resumen operativo y Salesforce')).toBeInTheDocument();
     expect(screen.getByText('Adjuntos en Salesforce')).toBeInTheDocument();
     expect(screen.getByText('Soporte técnico')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /auditoría/i }));
     expect(screen.getByText('Eventos administrativos recientes')).toBeInTheDocument();
     expect(screen.getAllByText('Ticket cerrado')).not.toHaveLength(0);
     expect(screen.getByText(/sf_case_id: 500ABC/i)).toBeInTheDocument();
-    expect(screen.getByText('Plantillas de mensajes de WhatsApp')).toBeInTheDocument();
-    expect(screen.getByText(/plantillas para momentos específicos/i)).toBeInTheDocument();
-    expect(screen.getByText(/no es un editor visual de flujos todavía/i)).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /flujos del bot/i }));
+    expect(screen.getByText('Mapa conversacional y plantillas de WhatsApp')).toBeInTheDocument();
+    expect(screen.getByText(/rail de conversación editable/i)).toBeInTheDocument();
+    expect(screen.getByText(/builder visual tipo SendPulse\/n8n/i)).toBeInTheDocument();
     expect(screen.getByText('ask_name')).toBeInTheDocument();
-    expect(within(screen.getByText('ask_issue').closest('tr')).getByText('Billing')).toBeInTheDocument();
-    expect(screen.getByText('Acme')).toBeInTheDocument();
-    expect(screen.getByText(/Por vencer/i)).toBeInTheDocument();
+    expect(within(screen.getByText('ask_issue').closest('article')).getByText('Billing')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /analistas/i }));
     expect(await screen.findAllByText('Billing')).not.toHaveLength(0);
     expect(screen.getAllByText('Ada Lovelace')).not.toHaveLength(0);
-    expect(within(screen.getByLabelText('Asignar ticket #33')).queryByRole('option', { name: /No Area Analyst/i })).not.toBeInTheDocument();
     expect(screen.getByText('Ada token')).toBeInTheDocument();
     expect(screen.queryByText('Admin Panel')).not.toBeInTheDocument();
     expect(screen.queryByText('Operations topology')).not.toBeInTheDocument();
+  });
+
+  it('renders a control-map navigation that selects one admin module at a time', async () => {
+    const user = userEvent.setup();
+    mockAdminFetch();
+
+    render(<AdminPanel onLogout={vi.fn()} />);
+    await screen.findByText('Centro de control');
+
+    const expectedSections = [
+      ['Resumen', 'admin-resumen'],
+      ['Cola y SLA', 'admin-cola-sla'],
+      ['Áreas', 'admin-areas'],
+      ['Analistas', 'admin-analistas'],
+      ['Flujos del bot', 'admin-flujos-bot'],
+      ['Salesforce/Outbox', 'admin-salesforce-outbox'],
+      ['Reportes', 'admin-reportes'],
+      ['Auditoría', 'admin-auditoria'],
+    ];
+
+    const navigation = screen.getByRole('navigation', { name: /secciones de administración/i });
+    const buttons = within(navigation).getAllByRole('button');
+    const expectedIds = expectedSections.map(([, id]) => id);
+
+    expect(buttons.map(button => button.getAttribute('aria-controls'))).toEqual(expectedIds.map(() => null));
+    expect(document.querySelectorAll('.admin-section-anchor')).toHaveLength(1);
+    expect(document.getElementById('admin-resumen')).toBeInTheDocument();
+
+    for (const [label, id] of expectedSections) {
+      const button = within(navigation).getByRole('button', { name: new RegExp(label, 'i') });
+      await user.click(button);
+      expect(button).toHaveAttribute('aria-current', 'page');
+      expect(document.getElementById(id)).toBeInTheDocument();
+      expect(document.querySelectorAll('.admin-section-anchor')).toHaveLength(1);
+    }
+  });
+
+  it('opens the matching module from a valid initial hash', async () => {
+    mockAdminFetch();
+    window.history.replaceState(null, '', '/admin#admin-auditoria');
+
+    render(<AdminPanel onLogout={vi.fn()} />);
+
+    expect(await screen.findByText('Eventos administrativos recientes')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /auditoría/i })).toHaveAttribute('aria-current', 'page');
+    expect(document.querySelectorAll('.admin-section-anchor')).toHaveLength(1);
+  });
+
+  it('falls back safely when the initial hash is not an admin module', async () => {
+    mockAdminFetch();
+    window.history.replaceState(null, '', '/admin#modulo-inexistente');
+
+    render(<AdminPanel onLogout={vi.fn()} />);
+
+    expect(await screen.findByText(/Cola híbrida con asignación manual/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /resumen/i })).toHaveAttribute('aria-current', 'page');
+    expect(screen.queryByText('Eventos administrativos recientes')).not.toBeInTheDocument();
+  });
+
+  it('updates the active module when the location hash changes', async () => {
+    mockAdminFetch();
+
+    render(<AdminPanel onLogout={vi.fn()} />);
+    expect(await screen.findByText(/Cola híbrida con asignación manual/i)).toBeInTheDocument();
+
+    window.history.replaceState(null, '', '/admin#admin-reportes');
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+
+    expect(await screen.findByText('Resumen operativo y Salesforce')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /reportes/i })).toHaveAttribute('aria-current', 'page');
+    expect(document.querySelectorAll('.admin-section-anchor')).toHaveLength(1);
+  });
+
+  it('updates the URL hash when a navigation module is selected', async () => {
+    const user = userEvent.setup();
+    mockAdminFetch();
+
+    render(<AdminPanel onLogout={vi.fn()} />);
+    await screen.findByText('Centro de control');
+
+    await user.click(screen.getByRole('button', { name: /flujos del bot/i }));
+
+    expect(window.location.hash).toBe('#admin-flujos-bot');
+    expect(screen.getByText('Mapa conversacional y plantillas de WhatsApp')).toBeInTheDocument();
   });
 
   it('filters audit history with backend-supported query parameters', async () => {
@@ -195,6 +293,7 @@ describe('AdminPanel', () => {
     mockAdminFetch();
 
     render(<AdminPanel onLogout={vi.fn()} />);
+    await user.click(await screen.findByRole('button', { name: /auditoría/i }));
     await screen.findByText('Eventos administrativos recientes');
     await screen.findAllByText('Ticket cerrado');
 
@@ -233,7 +332,8 @@ describe('AdminPanel', () => {
     mockAdminFetch();
 
     render(<AdminPanel onLogout={vi.fn()} />);
-    await screen.findAllByText('Ada Lovelace');
+    await user.click(await screen.findByRole('button', { name: /áreas/i }));
+    await screen.findAllByText('Billing');
 
     await user.type(screen.getByLabelText('Nombre'), 'Integrations');
     await user.click(screen.getByRole('button', { name: /crear área/i }));
@@ -252,6 +352,8 @@ describe('AdminPanel', () => {
     expect(updateAreaRequest.headers.get('Content-Type')).toBe('application/json');
     expect(JSON.parse(updateAreaRequest.body)).toMatchObject({ name: 'Billing', sla_minutes: 15 });
 
+    await user.click(screen.getByRole('button', { name: /analistas/i }));
+    await screen.findAllByText('Ada Lovelace');
     await user.click(screen.getByRole('button', { name: 'Habilitar' }));
 
     await waitFor(() => expect(requestFor('PATCH', '/api/admin/analysts/2')).toBeTruthy());
@@ -265,11 +367,11 @@ describe('AdminPanel', () => {
     mockAdminFetch();
 
     render(<AdminPanel onLogout={vi.fn()} />);
-    await screen.findByText('Plantillas de mensajes de WhatsApp');
+    await user.click(await screen.findByRole('button', { name: /flujos del bot/i }));
+    await screen.findByText('Mapa conversacional y plantillas de WhatsApp');
 
-    await user.selectOptions(screen.getByLabelText('Clave del paso'), 'confirmation');
-    await user.clear(screen.getByLabelText('Mensaje'));
-    await user.type(screen.getByLabelText('Mensaje'), 'Solicitud recibida');
+    fireEvent.change(screen.getByLabelText('Clave del paso'), { target: { value: 'confirmation' } });
+    fireEvent.change(screen.getByLabelText('Mensaje'), { target: { value: 'Solicitud recibida' } });
     await user.click(screen.getByRole('button', { name: /crear paso/i }));
 
     await waitFor(() => expect(requestFor('POST', '/api/admin/bot-flows')).toBeTruthy());
@@ -284,13 +386,13 @@ describe('AdminPanel', () => {
       active: true,
     });
 
-    await user.click(within(screen.getByText('ask_name').closest('tr')).getByRole('button', { name: 'Editar' }));
+    await user.click(within(screen.getByText('ask_name').closest('article')).getByRole('button', { name: 'Editar' }));
     await user.click(screen.getByRole('button', { name: /actualizar paso/i }));
 
     await waitFor(() => expect(requestFor('PATCH', '/api/admin/bot-flows/5')).toBeTruthy());
     expect(JSON.parse(requestFor('PATCH', '/api/admin/bot-flows/5').body)).toMatchObject({ step_key: 'ask_name' });
 
-    await user.click(within(screen.getByText('ask_issue').closest('tr')).getByRole('button', { name: 'Activar' }));
+    await user.click(within(screen.getByText('ask_issue').closest('article')).getByRole('button', { name: 'Activar' }));
 
     await waitFor(() => expect(requestFor('POST', '/api/admin/bot-flows/6/toggle')).toBeTruthy());
     expect(JSON.parse(requestFor('POST', '/api/admin/bot-flows/6/toggle').body)).toEqual({ active: true });
@@ -306,7 +408,7 @@ describe('AdminPanel', () => {
     mockAdminFetch();
 
     const { unmount } = render(<AdminPanel socket={socket} onLogout={vi.fn()} />);
-    await screen.findAllByText('Ada Lovelace');
+    await screen.findByText('Panel de administración');
 
     unmount();
 

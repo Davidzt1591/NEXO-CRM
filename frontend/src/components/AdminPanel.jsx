@@ -91,6 +91,17 @@ const SUPPORTED_BOT_FLOW_STEPS = Object.freeze([
   { key: 'ticket_error', label: 'Error al crear ticket' },
 ]);
 
+const ADMIN_SECTIONS = Object.freeze([
+  { id: 'admin-resumen', label: 'Resumen', group: 'Mando', icon: Activity, status: context => (context.loading ? 'Cargando' : `${context.activeQueueTicketsCount} tickets activos`), brief: 'Pulso general de operación, cobertura y automatización.' },
+  { id: 'admin-cola-sla', label: 'Cola y SLA', group: 'Atención', icon: Clock, status: context => `${context.slaRiskTicketsCount} en riesgo`, brief: 'Tickets vivos, asignación y riesgo de vencimiento.' },
+  { id: 'admin-areas', label: 'Áreas', group: 'Enrutamiento', icon: Building2, status: context => `${context.activeAreasCount}/${context.areasCount} activas`, brief: 'Cobertura, SLA y mensajes de bienvenida por dominio.' },
+  { id: 'admin-analistas', label: 'Analistas', group: 'Equipo', icon: Users, status: context => `${context.availableAnalystsCount}/${context.analystsCount} disponibles`, brief: 'Presencia operativa y disponibilidad para asignación.' },
+  { id: 'admin-flujos-bot', label: 'Flujos del bot', group: 'Automatización', icon: Bot, status: context => `${context.botFlowsCount} pasos · ${context.flowCacheCount} caché`, brief: 'Antesala visual del builder de conversaciones.' },
+  { id: 'admin-salesforce-outbox', label: 'Salesforce/Outbox', group: 'Integración', icon: RefreshCw, status: () => 'Sin vista de outbox', brief: 'Señales honestas de sincronización, sin controles falsos.' },
+  { id: 'admin-reportes', label: 'Reportes', group: 'Lectura', icon: TrendingUp, status: context => `${formatNumber(context.totalTickets)} tickets`, brief: 'Resumen operativo y señales de Salesforce.' },
+  { id: 'admin-auditoria', label: 'Auditoría', group: 'Trazabilidad', icon: History, status: context => `Página ${context.auditPage + 1} · ${context.auditLogsCount} eventos`, brief: 'Eventos administrativos y cambios recientes.' },
+]);
+
 function formatDate(value) {
   if (!value) return 'Nunca';
   return new Date(value).toLocaleString('es-CO', {
@@ -159,6 +170,10 @@ function auditMetadataPreview(metadata) {
   return entries.slice(0, 3).map(([key, value]) => `${key}: ${String(value)}`).join(' · ');
 }
 
+function flowStepLabel(stepKey) {
+  return SUPPORTED_BOT_FLOW_STEPS.find(step => step.key === stepKey)?.label || stepKey || 'Paso sin clave';
+}
+
 function slaLabel(sla) {
   if (!sla) return 'Sin SLA';
   if (sla.state === 'breached') return 'Vencido';
@@ -219,6 +234,11 @@ export default function AdminPanel({ socket, onLogout }) {
   const [auditPage, setAuditPage] = useState(0);
   const [auditLoading, setAuditLoading] = useState(false);
   const [auditError, setAuditError] = useState(null);
+  const [activeModuleId, setActiveModuleId] = useState(() => {
+    if (typeof window === 'undefined') return ADMIN_SECTIONS[0].id;
+    const hashId = window.location.hash.replace('#', '');
+    return ADMIN_SECTIONS.some(section => section.id === hashId) ? hashId : ADMIN_SECTIONS[0].id;
+  });
 
   const loadAdminData = useCallback(async ({ backgroundRefresh = false } = {}) => {
     if (!backgroundRefresh) setLoading(true);
@@ -308,6 +328,15 @@ export default function AdminPanel({ socket, onLogout }) {
     };
   }, [loadAdminData, socket]);
 
+  useEffect(() => {
+    const syncModuleFromHash = () => {
+      const hashId = window.location.hash.replace('#', '');
+      if (ADMIN_SECTIONS.some(section => section.id === hashId)) setActiveModuleId(hashId);
+    };
+    window.addEventListener('hashchange', syncModuleFromHash);
+    return () => window.removeEventListener('hashchange', syncModuleFromHash);
+  }, []);
+
   const activeAreas = useMemo(() => areas.filter(area => area.active !== false), [areas]);
   const availableAnalysts = useMemo(() => analysts.filter(analyst => analyst.available), [analysts]);
   const activeQueueTickets = useMemo(() => queueTickets.filter(ticket => ticket.status !== 'closed'), [queueTickets]);
@@ -315,10 +344,51 @@ export default function AdminPanel({ socket, onLogout }) {
   const areaNameById = useMemo(() => new Map(areas.map(area => [String(area.id), area.name])), [areas]);
   const reportByArea = Array.isArray(reportSummary?.by_area) ? reportSummary.by_area : [];
   const hasAuditNextPage = auditLogs.length === AUDIT_PAGE_SIZE;
+  const activeModule = useMemo(
+    () => ADMIN_SECTIONS.find(section => section.id === activeModuleId) || ADMIN_SECTIONS[0],
+    [activeModuleId],
+  );
+  const sortedBotFlows = useMemo(
+    () => [...botFlows].sort((a, b) => (Number(a.sort_order) || 0) - (Number(b.sort_order) || 0) || String(a.step_key).localeCompare(String(b.step_key))),
+    [botFlows],
+  );
+
+  const adminSectionContext = useMemo(() => ({
+    activeAreasCount: activeAreas.length,
+    activeQueueTicketsCount: activeQueueTickets.length,
+    analystsCount: analysts.length,
+    areasCount: areas.length,
+    auditLogsCount: auditLogs.length,
+    auditPage,
+    availableAnalystsCount: availableAnalysts.length,
+    botFlowsCount: botFlows.length,
+    flowCacheCount: flowCache.length,
+    loading,
+    slaRiskTicketsCount: slaRiskTickets.length,
+    totalTickets: reportSummary?.total_tickets,
+  }), [
+    activeAreas.length,
+    activeQueueTickets.length,
+    analysts.length,
+    areas.length,
+    auditLogs.length,
+    auditPage,
+    availableAnalysts.length,
+    botFlows.length,
+    flowCache.length,
+    loading,
+    reportSummary?.total_tickets,
+    slaRiskTickets.length,
+  ]);
 
   const resetAreaForm = () => setAreaForm(EMPTY_AREA_FORM);
   const resetAnalystForm = () => setAnalystForm(EMPTY_ANALYST_FORM);
   const resetFlowForm = () => setFlowForm(EMPTY_FLOW_FORM);
+
+  const selectModule = (moduleId) => {
+    setActiveModuleId(moduleId);
+    if (typeof window !== 'undefined') window.history.replaceState(null, '', `#${moduleId}`);
+  };
 
   const editArea = (area) => {
     setAreaForm({
@@ -568,11 +638,55 @@ export default function AdminPanel({ socket, onLogout }) {
         </div>
       </header>
 
-      <main className="admin-workspace">
-        <section className="admin-hero-card">
+      <div className="admin-body">
+        <aside className="admin-rail" aria-label="Secciones de administración">
+          <div className="admin-rail__header">
+            <p className="admin-kicker">Mapa operativo</p>
+            <h2>Centro de control</h2>
+            <span>Seleccioná un módulo para enfocar la operación. La página ya no muestra todo al mismo tiempo.</span>
+          </div>
+          <nav className="admin-rail__nav" aria-label="Secciones de administración">
+            {ADMIN_SECTIONS.map(section => {
+              const SectionIcon = section.icon;
+              const selected = section.id === activeModule.id;
+              return (
+                <button
+                  key={section.id}
+                  type="button"
+                  className={`admin-rail-link ${selected ? 'admin-rail-link--active' : ''}`}
+                  aria-current={selected ? 'page' : undefined}
+                  onClick={() => selectModule(section.id)}
+                >
+                  <span className="admin-rail-link__icon"><SectionIcon size={16} /></span>
+                  <span className="admin-rail-link__copy">
+                    <em>{section.group}</em>
+                    <strong>{section.label}</strong>
+                    <small>{section.status?.(adminSectionContext) || 'Disponible'}</small>
+                  </span>
+                </button>
+              );
+            })}
+          </nav>
+        </aside>
+
+        <main className="admin-workspace">
+        <div className="admin-module-header">
+          <div>
+            <p className="admin-kicker">Módulo activo</p>
+            <h2>{activeModule.label}</h2>
+            <span>{activeModule.brief}</span>
+          </div>
+          <span className="admin-module-header__status">{activeModule.status?.(adminSectionContext) || 'Disponible'}</span>
+        </div>
+
+        {error && <AdminAlert type="error">{error}</AdminAlert>}
+        {notice && <AdminAlert type="success">{notice}</AdminAlert>}
+
+        {activeModuleId === 'admin-resumen' && <>
+        <section id="admin-resumen" className="admin-hero-card admin-section-anchor" aria-labelledby="admin-resumen-title">
           <div>
             <p className="admin-kicker">Administración de Fase 4</p>
-            <h2>Cola híbrida con asignación manual, automática y seguimiento SLA.</h2>
+            <h2 id="admin-resumen-title">Cola híbrida con asignación manual, automática y seguimiento SLA.</h2>
             <p>
               La asignación automática solo aplica a tickets con área definida y analista disponible. Los tickets sin área quedan pendientes hasta que un administrador los asigne o defina su área.
             </p>
@@ -585,233 +699,16 @@ export default function AdminPanel({ socket, onLogout }) {
           </div>
         </section>
 
-        {error && <AdminAlert type="error">{error}</AdminAlert>}
-        {notice && <AdminAlert type="success">{notice}</AdminAlert>}
         <AdminAlert>
-          La presencia se actualiza cada {ADMIN_REFRESH_INTERVAL_MS / 1000} segundos y cuando el socket se reconecta. Los cambios de asignación refrescan la cola en tiempo real.
-        </AdminAlert>
+            La presencia se actualiza cada {ADMIN_REFRESH_INTERVAL_MS / 1000} segundos y cuando el socket se reconecta. Los cambios de asignación refrescan la cola en tiempo real.
+          </AdminAlert>
+        </>}
 
-        <section className="admin-card admin-card--wide admin-reports-card">
+        {activeModuleId === 'admin-cola-sla' && (
+        <section id="admin-cola-sla" className="admin-card admin-card--wide admin-section-anchor">
           <div className="admin-section-heading">
             <div>
-              <p className="admin-kicker">Reportes de Fase 5</p>
-              <h3>Resumen operativo y Salesforce</h3>
-            </div>
-            {loading && <div className="qr-loading__spinner admin-mini-spinner" />}
-          </div>
-
-          <div className="admin-report-grid">
-            <AdminStat icon={FileText} label="Tickets totales" value={formatNumber(reportSummary?.total_tickets)} />
-            <AdminStat icon={Activity} label="Tickets abiertos" value={formatNumber(reportSummary?.open_tickets)} tone="amber" />
-            <AdminStat icon={Check} label="Tickets cerrados" value={formatNumber(reportSummary?.closed_tickets)} tone="green" />
-            <AdminStat icon={Paperclip} label="Adjuntos en Salesforce" value={formatNumber(reportSummary?.sf_attachments)} tone="purple" />
-            <AdminStat icon={TrendingUp} label="Promedio de cierre" value={formatMinutes(reportSummary?.avg_close_minutes)} tone="green" />
-          </div>
-
-          <div className="admin-table-wrap admin-report-table-wrap">
-            <table className="admin-table admin-table--compact">
-              <thead>
-                <tr>
-                  <th>Área</th>
-                  <th>Total</th>
-                  <th>Abiertos</th>
-                  <th>Cerrados</th>
-                </tr>
-              </thead>
-              <tbody>
-                {reportByArea.length === 0 && !loading ? (
-                  <tr><td colSpan="4" className="admin-empty">Aún no hay datos suficientes para el resumen por área.</td></tr>
-                ) : reportByArea.map(area => (
-                  <tr key={area.area || 'Sin área'}>
-                    <td><strong>{area.area || 'Sin área'}</strong></td>
-                    <td>{formatNumber(area.total)}</td>
-                    <td>{formatNumber(area.open)}</td>
-                    <td>{formatNumber(area.closed)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
-
-        <section className="admin-card admin-card--wide admin-audit-card">
-          <div className="admin-section-heading">
-            <div>
-              <p className="admin-kicker">Historial de auditoría</p>
-              <h3>Eventos administrativos recientes</h3>
-            </div>
-            {auditLoading && <div className="qr-loading__spinner admin-mini-spinner" />}
-          </div>
-
-          <div className="admin-audit-controls">
-            <label>
-              <span>Acción</span>
-              <select value={auditFilters.action} onChange={event => updateAuditFilter('action', event.target.value)}>
-                <option value="">Todas las acciones</option>
-                {AUDIT_ACTION_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-              </select>
-            </label>
-            <label>
-              <span>Rol</span>
-              <select value={auditFilters.actor_role} onChange={event => updateAuditFilter('actor_role', event.target.value)}>
-                <option value="">Todos los roles</option>
-                <option value="admin">Administrador</option>
-                <option value="agent">Analista</option>
-              </select>
-            </label>
-            <label>
-              <span>ID objetivo</span>
-              <input value={auditFilters.target_id} onChange={event => updateAuditFilter('target_id', event.target.value)} placeholder="Ticket, área o flujo" />
-            </label>
-            <button className="admin-soft-btn" onClick={() => loadAuditData()} disabled={auditLoading}>
-              <History size={14} /> Aplicar filtros
-            </button>
-          </div>
-
-          {auditError && <AdminAlert type="error">{auditError}</AdminAlert>}
-
-          <div className="admin-table-wrap">
-            <table className="admin-table admin-table--audit">
-              <thead>
-                <tr>
-                  <th>Fecha</th>
-                  <th>Acción</th>
-                  <th>Actor</th>
-                  <th>Objetivo</th>
-                  <th>Detalle</th>
-                </tr>
-              </thead>
-              <tbody>
-                {auditLogs.length === 0 && !auditLoading ? (
-                  <tr><td colSpan="5" className="admin-empty">No hay eventos de auditoría para los filtros seleccionados.</td></tr>
-                ) : auditLogs.map(log => (
-                  <tr key={log.id || `${log.action}-${log.created_at}-${log.target_id}`}>
-                    <td>{formatDate(log.created_at)}</td>
-                    <td><span className="admin-pill admin-pill--muted">{auditActionLabel(log.action)}</span></td>
-                    <td>
-                      <strong>{log.actor_name || 'Sistema'}</strong>
-                      <span className="admin-table-subtext">{log.actor_role || 'Sin rol'}</span>
-                    </td>
-                    <td>{log.target_id || 'Sin objetivo'}</td>
-                    <td>{auditMetadataPreview(log.metadata)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-
-          <div className="admin-pagination-row">
-            <span>Página {auditPage + 1}</span>
-            <div className="admin-row-actions">
-              <button className="admin-soft-btn" disabled={auditPage === 0 || auditLoading} onClick={() => setAuditPage(prev => Math.max(prev - 1, 0))}>Anterior</button>
-              <button className="admin-soft-btn" disabled={!hasAuditNextPage || auditLoading} onClick={() => setAuditPage(prev => prev + 1)}>Siguiente</button>
-            </div>
-          </div>
-        </section>
-
-        <section className="admin-card admin-card--wide admin-flow-manager">
-          <div className="admin-section-heading">
-            <div>
-              <p className="admin-kicker">Gestor de flujos del bot</p>
-              <h3>Plantillas de mensajes de WhatsApp</h3>
-            </div>
-            <div className="admin-row-actions">
-              <span className="admin-pill admin-pill--muted">{flowCache.length} entradas en caché</span>
-              <button className="admin-soft-btn" onClick={invalidateFlowCache}><RefreshCw size={14} /> Invalidar caché</button>
-            </div>
-          </div>
-
-              <p className="admin-help-text">
-            Estos pasos son plantillas para momentos específicos que el bot de WhatsApp ya reconoce. Podés crear versiones globales o personalizadas por área; no es un editor visual de flujos todavía.
-          </p>
-
-          <div className="admin-flow-layout">
-            <form className="admin-form admin-flow-form" onSubmit={submitFlow}>
-              <div className="admin-form__row admin-form__row--thirds">
-                <label>
-                  <span>Versión</span>
-                  <input type="number" min="1" value={flowForm.version_id} onChange={e => setFlowForm(prev => ({ ...prev, version_id: e.target.value }))} />
-                </label>
-                <label>
-                  <span>Área</span>
-                  <select value={flowForm.area_id} onChange={e => setFlowForm(prev => ({ ...prev, area_id: e.target.value }))}>
-                    <option value="">Global</option>
-                    {areas.map(area => <option key={area.id} value={area.id}>{area.name}</option>)}
-                  </select>
-                </label>
-                <label>
-                  <span>Orden</span>
-                  <input type="number" value={flowForm.sort_order} onChange={e => setFlowForm(prev => ({ ...prev, sort_order: e.target.value }))} />
-                </label>
-              </div>
-              <label>
-                <span>Clave del paso</span>
-                <select value={flowForm.step_key} onChange={e => setFlowForm(prev => ({ ...prev, step_key: e.target.value }))}>
-                  <option value="">Seleccioná un momento del bot</option>
-                  {SUPPORTED_BOT_FLOW_STEPS.map(step => <option key={step.key} value={step.key}>{step.label} · {step.key}</option>)}
-                </select>
-              </label>
-              <label>
-                <span>Mensaje</span>
-                <textarea value={flowForm.message} onChange={e => setFlowForm(prev => ({ ...prev, message: e.target.value }))} rows={5} placeholder="Texto que enviará el bot. Podés usar variables como {{nombre}}." />
-              </label>
-              <label className="admin-check-row">
-                <input type="checkbox" checked={flowForm.active} onChange={e => setFlowForm(prev => ({ ...prev, active: e.target.checked }))} />
-                <span>Activo para el bot</span>
-              </label>
-              <div className="admin-row-actions">
-                <button className="admin-primary-btn" disabled={savingFlow || !flowForm.step_key.trim() || !flowForm.message.trim()}>
-                  <Save size={16} /> {savingFlow ? 'Guardando...' : flowForm.id ? 'Actualizar paso' : 'Crear paso'}
-                </button>
-                {flowForm.id && <button type="button" className="admin-soft-btn" onClick={resetFlowForm}>Nuevo paso</button>}
-              </div>
-            </form>
-
-            <div className="admin-table-wrap admin-flow-table-wrap">
-              <table className="admin-table admin-table--flows">
-                <thead>
-                  <tr>
-                    <th>Paso</th>
-                    <th>Versión</th>
-                    <th>Área</th>
-                    <th>Estado</th>
-                    <th>Acciones</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {botFlows.length === 0 && !loading ? (
-                    <tr><td colSpan="5" className="admin-empty">Aún no hay plantillas configuradas. El bot usará los mensajes estáticos de respaldo.</td></tr>
-                  ) : botFlows.map(flow => (
-                    <tr key={flow.id}>
-                      <td>
-                        <strong>{flow.step_key}</strong>
-                        <span className="admin-table-subtext admin-flow-message-preview">{flow.message}</span>
-                      </td>
-                      <td>v{flow.version_id}</td>
-                      <td>{flow.area?.name || (flow.area_id ? areaNameById.get(String(flow.area_id)) || `Área #${flow.area_id}` : 'Global')}</td>
-                      <td>
-                        <span className={`admin-pill ${flow.active === false ? 'admin-pill--muted' : 'admin-pill--green'}`}>
-                          {flow.active === false ? 'Inactivo' : 'Activo'}
-                        </span>
-                      </td>
-                      <td>
-                        <div className="admin-row-actions">
-                          <button className="admin-soft-btn" onClick={() => editFlow(flow)}>Editar</button>
-                          <button className="admin-soft-btn" onClick={() => toggleFlowActive(flow)}>{flow.active === false ? 'Activar' : 'Desactivar'}</button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </section>
-
-        <section className="admin-card admin-card--wide">
-          <div className="admin-section-heading">
-            <div>
-              <p className="admin-kicker">Enrutamiento y cola</p>
+              <p className="admin-kicker">Cola y SLA</p>
               <h3>Tickets actuales</h3>
             </div>
             <div className="admin-meta-row">
@@ -873,8 +770,16 @@ export default function AdminPanel({ socket, onLogout }) {
             </table>
           </div>
         </section>
+        )}
 
-        <div className="admin-grid">
+        {activeModuleId === 'admin-areas' && (
+        <section id="admin-areas" className="admin-section-group admin-section-anchor" aria-labelledby="admin-areas-title">
+          <div className="admin-section-group__header">
+            <p className="admin-kicker">Áreas</p>
+            <h3 id="admin-areas-title">Mapa de cobertura y SLA</h3>
+          </div>
+
+          <div className="admin-grid">
           <section className="admin-card admin-card--form">
             <div className="admin-section-heading">
               <div>
@@ -944,7 +849,18 @@ export default function AdminPanel({ socket, onLogout }) {
               ))}
             </div>
           </section>
+          </div>
+        </section>
+        )}
 
+        {activeModuleId === 'admin-analistas' && (
+        <section id="admin-analistas" className="admin-section-group admin-section-anchor" aria-labelledby="admin-analistas-title">
+          <div className="admin-section-group__header">
+            <p className="admin-kicker">Analistas</p>
+            <h3 id="admin-analistas-title">Presencia y disponibilidad</h3>
+          </div>
+
+          <div className="admin-grid">
           <section className="admin-card admin-card--form">
             <div className="admin-section-heading">
               <div>
@@ -1039,8 +955,267 @@ export default function AdminPanel({ socket, onLogout }) {
               </table>
             </div>
           </section>
-        </div>
-      </main>
+          </div>
+        </section>
+        )}
+
+        {activeModuleId === 'admin-flujos-bot' && (
+        <section id="admin-flujos-bot" className="admin-card admin-card--wide admin-flow-manager admin-section-anchor">
+          <div className="admin-section-heading">
+            <div>
+              <p className="admin-kicker">Gestor de flujos del bot</p>
+              <h3>Mapa conversacional y plantillas de WhatsApp</h3>
+            </div>
+            <div className="admin-row-actions">
+              <span className="admin-pill admin-pill--muted">{flowCache.length} entradas en caché</span>
+              <button className="admin-soft-btn" onClick={invalidateFlowCache}><RefreshCw size={14} /> Invalidar caché</button>
+            </div>
+          </div>
+
+          <p className="admin-help-text">
+            Esta vista muestra los momentos que el bot ya reconoce como un rail de conversación editable. Todavía no es el builder visual tipo SendPulse/n8n, pero deja preparado el lenguaje visual para conectar nodos, versiones y previews.
+          </p>
+
+          <div className="admin-flow-layout">
+            <section className="admin-flow-canvas" aria-label="Rail visual de pasos del bot">
+              <div className="admin-flow-canvas__topology">
+                <div className="admin-flow-start-node">
+                  <span>Entrada WhatsApp</span>
+                  <strong>Contacto escribe al bot</strong>
+                </div>
+                {sortedBotFlows.length === 0 && !loading ? (
+                  <div className="admin-empty admin-flow-empty">Aún no hay plantillas configuradas. El bot usará los mensajes estáticos de respaldo.</div>
+                ) : sortedBotFlows.map((flow, index) => (
+                  <article key={flow.id} className={`admin-flow-node ${flow.active === false ? 'admin-flow-node--muted' : ''}`}>
+                    <div className="admin-flow-node__rail">
+                      <span>{String(index + 1).padStart(2, '0')}</span>
+                    </div>
+                    <div className="admin-flow-node__body">
+                      <div className="admin-flow-node__header">
+                        <div>
+                          <p>{flowStepLabel(flow.step_key)}</p>
+                          <h4>{flow.step_key}</h4>
+                        </div>
+                        <span className={`admin-pill ${flow.active === false ? 'admin-pill--muted' : 'admin-pill--green'}`}>
+                          {flow.active === false ? 'Inactivo' : 'Activo'} · v{flow.version_id}
+                        </span>
+                      </div>
+                      <p className="admin-flow-node__message">{flow.message}</p>
+                      <div className="admin-flow-node__footer">
+                        <span>{flow.area?.name || (flow.area_id ? areaNameById.get(String(flow.area_id)) || `Área #${flow.area_id}` : 'Global')}</span>
+                        <div className="admin-row-actions">
+                          <button className="admin-soft-btn" onClick={() => editFlow(flow)}>Editar</button>
+                          <button className="admin-soft-btn" onClick={() => toggleFlowActive(flow)}>{flow.active === false ? 'Activar' : 'Desactivar'}</button>
+                        </div>
+                      </div>
+                    </div>
+                  </article>
+                ))}
+              </div>
+              <aside className="admin-flow-preview" aria-label="Preview conversacional">
+                <p className="admin-kicker">Preview</p>
+                <div className="admin-flow-phone">
+                  <div className="admin-flow-phone__bar">NEXO Bot</div>
+                  <div className="admin-flow-bubble admin-flow-bubble--in">Hola, necesito ayuda con mi solicitud.</div>
+                  <div className="admin-flow-bubble admin-flow-bubble--out">{flowForm.message.trim() || sortedBotFlows[0]?.message || 'Seleccioná o escribí un mensaje para previsualizar la respuesta del bot.'}</div>
+                </div>
+                <div className="admin-flow-next-step">
+                  <strong>Siguiente evolución</strong>
+                  <span>Convertir este rail en builder visual con nodos arrastrables, condiciones y conexión entre pasos.</span>
+                </div>
+              </aside>
+            </section>
+
+            <form className="admin-form admin-flow-form" onSubmit={submitFlow} aria-label="Editor de paso del bot">
+              <div className="admin-flow-form__heading">
+                <p className="admin-kicker">Editor lateral</p>
+                <h4>{flowForm.id ? 'Editar nodo conversacional' : 'Crear nodo conversacional'}</h4>
+              </div>
+              <div className="admin-form__row admin-form__row--thirds">
+                <label>
+                  <span>Versión</span>
+                  <input type="number" min="1" value={flowForm.version_id} onChange={e => setFlowForm(prev => ({ ...prev, version_id: e.target.value }))} />
+                </label>
+                <label>
+                  <span>Área</span>
+                  <select value={flowForm.area_id} onChange={e => setFlowForm(prev => ({ ...prev, area_id: e.target.value }))}>
+                    <option value="">Global</option>
+                    {areas.map(area => <option key={area.id} value={area.id}>{area.name}</option>)}
+                  </select>
+                </label>
+                <label>
+                  <span>Orden</span>
+                  <input type="number" value={flowForm.sort_order} onChange={e => setFlowForm(prev => ({ ...prev, sort_order: e.target.value }))} />
+                </label>
+              </div>
+              <label>
+                <span>Clave del paso</span>
+                <select value={flowForm.step_key} onChange={e => setFlowForm(prev => ({ ...prev, step_key: e.target.value }))}>
+                  <option value="">Seleccioná un momento del bot</option>
+                  {SUPPORTED_BOT_FLOW_STEPS.map(step => <option key={step.key} value={step.key}>{step.label} · {step.key}</option>)}
+                </select>
+              </label>
+              <label>
+                <span>Mensaje</span>
+                <textarea value={flowForm.message} onChange={e => setFlowForm(prev => ({ ...prev, message: e.target.value }))} rows={5} placeholder="Texto que enviará el bot. Podés usar variables como {{nombre}}." />
+              </label>
+              <label className="admin-check-row">
+                <input type="checkbox" checked={flowForm.active} onChange={e => setFlowForm(prev => ({ ...prev, active: e.target.checked }))} />
+                <span>Activo para el bot</span>
+              </label>
+              <div className="admin-row-actions">
+                <button className="admin-primary-btn" disabled={savingFlow || !flowForm.step_key.trim() || !flowForm.message.trim()}>
+                  <Save size={16} /> {savingFlow ? 'Guardando...' : flowForm.id ? 'Actualizar paso' : 'Crear paso'}
+                </button>
+                {flowForm.id && <button type="button" className="admin-soft-btn" onClick={resetFlowForm}>Nuevo paso</button>}
+              </div>
+            </form>
+          </div>
+        </section>
+        )}
+
+        {activeModuleId === 'admin-salesforce-outbox' && (
+        <section id="admin-salesforce-outbox" className="admin-card admin-card--wide admin-outbox-card admin-section-anchor">
+          <div className="admin-section-heading">
+            <div>
+              <p className="admin-kicker">Salesforce/Outbox</p>
+              <h3>Sin panel de reintentos en esta iteración</h3>
+            </div>
+            <span className="admin-pill admin-pill--muted">Integración supervisada por backend</span>
+          </div>
+          <p className="admin-help-text">
+            El backoffice ya muestra señales de Salesforce en reportes y auditoría, pero esta pantalla todavía no consume una vista administrativa del outbox. Para evitar controles falsos, esta sección queda como punto de monitoreo honesto hasta implementar la UI de reintentos.
+          </p>
+          <div className="admin-outbox-grid">
+            <AdminStat icon={Paperclip} label="Adjuntos sincronizados" value={formatNumber(reportSummary?.sf_attachments)} tone="purple" />
+            <AdminStat icon={Check} label="Tickets cerrados" value={formatNumber(reportSummary?.closed_tickets)} tone="green" />
+          </div>
+        </section>
+        )}
+
+        {activeModuleId === 'admin-reportes' && (
+        <section id="admin-reportes" className="admin-card admin-card--wide admin-reports-card admin-section-anchor">
+          <div className="admin-section-heading">
+            <div>
+              <p className="admin-kicker">Reportes de Fase 5</p>
+              <h3>Resumen operativo y Salesforce</h3>
+            </div>
+            {loading && <div className="qr-loading__spinner admin-mini-spinner" />}
+          </div>
+
+          <div className="admin-report-grid">
+            <AdminStat icon={FileText} label="Tickets totales" value={formatNumber(reportSummary?.total_tickets)} />
+            <AdminStat icon={Activity} label="Tickets abiertos" value={formatNumber(reportSummary?.open_tickets)} tone="amber" />
+            <AdminStat icon={Check} label="Tickets cerrados" value={formatNumber(reportSummary?.closed_tickets)} tone="green" />
+            <AdminStat icon={Paperclip} label="Adjuntos en Salesforce" value={formatNumber(reportSummary?.sf_attachments)} tone="purple" />
+            <AdminStat icon={TrendingUp} label="Promedio de cierre" value={formatMinutes(reportSummary?.avg_close_minutes)} tone="green" />
+          </div>
+
+          <div className="admin-table-wrap admin-report-table-wrap">
+            <table className="admin-table admin-table--compact">
+              <thead>
+                <tr>
+                  <th>Área</th>
+                  <th>Total</th>
+                  <th>Abiertos</th>
+                  <th>Cerrados</th>
+                </tr>
+              </thead>
+              <tbody>
+                {reportByArea.length === 0 && !loading ? (
+                  <tr><td colSpan="4" className="admin-empty">Aún no hay datos suficientes para el resumen por área.</td></tr>
+                ) : reportByArea.map(area => (
+                  <tr key={area.area || 'Sin área'}>
+                    <td><strong>{area.area || 'Sin área'}</strong></td>
+                    <td>{formatNumber(area.total)}</td>
+                    <td>{formatNumber(area.open)}</td>
+                    <td>{formatNumber(area.closed)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+        )}
+
+        {activeModuleId === 'admin-auditoria' && (
+        <section id="admin-auditoria" className="admin-card admin-card--wide admin-audit-card admin-section-anchor">
+          <div className="admin-section-heading">
+            <div>
+              <p className="admin-kicker">Historial de auditoría</p>
+              <h3>Eventos administrativos recientes</h3>
+            </div>
+            {auditLoading && <div className="qr-loading__spinner admin-mini-spinner" />}
+          </div>
+
+          <div className="admin-audit-controls">
+            <label>
+              <span>Acción</span>
+              <select value={auditFilters.action} onChange={event => updateAuditFilter('action', event.target.value)}>
+                <option value="">Todas las acciones</option>
+                {AUDIT_ACTION_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              </select>
+            </label>
+            <label>
+              <span>Rol</span>
+              <select value={auditFilters.actor_role} onChange={event => updateAuditFilter('actor_role', event.target.value)}>
+                <option value="">Todos los roles</option>
+                <option value="admin">Administrador</option>
+                <option value="agent">Analista</option>
+              </select>
+            </label>
+            <label>
+              <span>ID objetivo</span>
+              <input value={auditFilters.target_id} onChange={event => updateAuditFilter('target_id', event.target.value)} placeholder="Ticket, área o flujo" />
+            </label>
+            <button className="admin-soft-btn" onClick={() => loadAuditData()} disabled={auditLoading}>
+              <History size={14} /> Aplicar filtros
+            </button>
+          </div>
+
+          {auditError && <AdminAlert type="error">{auditError}</AdminAlert>}
+
+          <div className="admin-table-wrap">
+            <table className="admin-table admin-table--audit">
+              <thead>
+                <tr>
+                  <th>Fecha</th>
+                  <th>Acción</th>
+                  <th>Actor</th>
+                  <th>Objetivo</th>
+                  <th>Detalle</th>
+                </tr>
+              </thead>
+              <tbody>
+                {auditLogs.length === 0 && !auditLoading ? (
+                  <tr><td colSpan="5" className="admin-empty">No hay eventos de auditoría para los filtros seleccionados.</td></tr>
+                ) : auditLogs.map(log => (
+                  <tr key={log.id || `${log.action}-${log.created_at}-${log.target_id}`}>
+                    <td>{formatDate(log.created_at)}</td>
+                    <td><span className="admin-pill admin-pill--muted">{auditActionLabel(log.action)}</span></td>
+                    <td>
+                      <strong>{log.actor_name || 'Sistema'}</strong>
+                      <span className="admin-table-subtext">{log.actor_role || 'Sin rol'}</span>
+                    </td>
+                    <td>{log.target_id || 'Sin objetivo'}</td>
+                    <td>{auditMetadataPreview(log.metadata)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="admin-pagination-row">
+            <span>Página {auditPage + 1}</span>
+            <div className="admin-row-actions">
+              <button className="admin-soft-btn" disabled={auditPage === 0 || auditLoading} onClick={() => setAuditPage(prev => Math.max(prev - 1, 0))}>Anterior</button>
+              <button className="admin-soft-btn" disabled={!hasAuditNextPage || auditLoading} onClick={() => setAuditPage(prev => prev + 1)}>Siguiente</button>
+            </div>
+          </div>
+        </section>
+        )}
+        </main>
+      </div>
     </div>
   );
 }
