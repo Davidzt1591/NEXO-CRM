@@ -124,6 +124,7 @@ function createMockDb(overrides = {}) {
     updateBotFlowStep: async (id, payload) => ({ id, step_key: 'ask_name', version_id: 1, area_id: null, message: 'Nombre', sort_order: 0, active: true, ...payload }),
     listSalesforceOutboxJobs: async () => [],
     markSalesforceOutboxJobRetryable: async id => ({ id, ticket_id: 7, operation: 'case_close', status: 'pending' }),
+    claimSalesforceOutboxJobs: async () => [],
     ...overrides,
   };
 }
@@ -341,6 +342,79 @@ test('/api/admin Salesforce outbox missing schema returns controlled 503', async
     assert.equal(res.status, 503);
     assert.deepEqual(res.body, { error: 'Salesforce outbox schema is not available.' });
   });
+});
+
+test('/api/admin one-shot processor bounds limit, audits safe counts, and returns no sensitive fields', async () => {
+  const audits = [];
+  let claimLimit;
+  await withServer(createMockDb({
+    claimSalesforceOutboxJobs: async (workerId, limit) => { assert.match(workerId, /^admin-/); claimLimit = limit; return []; },
+    logAudit: async payload => { audits.push(payload); return { id: 1 }; },
+  }), { role: 'admin', name: 'Root' }, async (baseUrl) => {
+    const res = await request(baseUrl, 'POST', '/api/admin/salesforce-outbox/process', { limit: 99, payload: 'secret' });
+    assert.equal(res.status, 200);
+    assert.equal(claimLimit, 1);
+    assert.deepEqual(res.body.counts, { claimed: 0, synced: 0, retrying: 0, failed: 0, lease_lost: 0, processor_error: 0 });
+    assert.doesNotMatch(JSON.stringify(res.body), /secret/);
+    assert.equal(res.body.recovery, 'manual_admin_invocation_required');
+    assert.equal(res.body.invocation, 'manual_only');
+    assert.equal(res.body.audit_persisted, true);
+    assert.deepEqual(res.body.warnings, []);
+    assert.equal(res.body.external_alerting, 'not_configured_intentional_next_step');
+    assert.equal(audits[0].action, 'salesforce_outbox.processed');
+    assert.equal(audits[0].metadata.limit, 10);
+  });
+});
+
+test('/api/admin surfaces processor audit persistence failure with a safe fallback', async () => {
+  const originalError = console.error;
+  const errors = [];
+  console.error = (...args) => errors.push(args.join(' '));
+  try {
+    await withServer(createMockDb({
+      claimSalesforceOutboxJobs: async () => [],
+      logAudit: async () => { throw new Error('database secret details'); },
+    }), { role: 'admin', name: 'Root' }, async (baseUrl) => {
+      const res = await request(baseUrl, 'POST', '/api/admin/salesforce-outbox/process', { limit: 1 });
+      assert.equal(res.status, 200);
+      assert.equal(res.body.audit_persisted, false);
+      assert.deepEqual(res.body.warnings, ['PROCESSOR_AUDIT_PERSIST_FAILED']);
+      assert.deepEqual(errors, ['[salesforce_outbox] processor_audit_persist_failed']);
+      assert.doesNotMatch(JSON.stringify(res.body) + errors.join(' '), /database secret details/);
+    });
+  } finally {
+    console.error = originalError;
+  }
+});
+
+test('/api/admin audits processor-level claim failure with safe code and manual recovery', async () => {
+  const audits = [];
+  await withServer(createMockDb({
+    claimSalesforceOutboxJobs: async () => { throw Object.assign(new Error('database secret details'), { code: 'DB_CLAIM_FAILED' }); },
+    logAudit: async payload => { audits.push(payload); return { id: 1 }; },
+  }), { role: 'admin', name: 'Root' }, async (baseUrl) => {
+    const res = await request(baseUrl, 'POST', '/api/admin/salesforce-outbox/process', { limit: 2 });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.counts.processor_error, 1);
+    assert.equal(res.body.recovery, 'manual_admin_invocation_required');
+    assert.doesNotMatch(JSON.stringify(res.body), /database secret details/);
+    assert.equal(audits[0].action, 'salesforce_outbox.process_failed');
+    assert.equal(audits[0].metadata.error_code, 'DB_CLAIM_FAILED');
+    assert.equal(audits[0].metadata.error_category, 'claim_failure');
+    assert.equal(audits[0].metadata.processor_error, 1);
+  });
+});
+
+test('/api/admin one-shot processor defaults to one and rejects non-admin access', async () => {
+  let calls = 0;
+  const mockDb = createMockDb({ claimSalesforceOutboxJobs: async (workerId, limit) => { calls += 1; assert.equal(limit, 1); return []; } });
+  await withServer(mockDb, { role: 'admin' }, async baseUrl => {
+    assert.equal((await request(baseUrl, 'POST', '/api/admin/salesforce-outbox/process', {})).status, 200);
+  });
+  await withServer(mockDb, { role: 'agent' }, async baseUrl => {
+    assert.equal((await request(baseUrl, 'POST', '/api/admin/salesforce-outbox/process', {})).status, 403);
+  });
+  assert.equal(calls, 1);
 });
 
 test('/api/admin returns 500 when audit listing rejects', async () => {

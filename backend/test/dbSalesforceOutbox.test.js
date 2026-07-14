@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
+const { SALESFORCE_OUTBOX_LEASE_SECONDS } = require('../src/services/salesforceOutboxContract');
 
 const dbPath = path.resolve(__dirname, '../src/database/db.js');
 const supabaseModulePath = require.resolve('@supabase/supabase-js');
@@ -24,6 +25,7 @@ function createQuery(result, hooks = {}) {
   return {
     select(columns) { hooks.select?.(columns); return this; },
     eq(field, value) { hooks.eq?.(field, value); return this; },
+    gte(field, value) { hooks.gte?.(field, value); return this; },
     in(field, values) { hooks.in?.(field, values); return this; },
     order(field, options) { hooks.order?.(field, options); return this; },
     range(from, to) { hooks.range?.(from, to); return this; },
@@ -32,6 +34,32 @@ function createQuery(result, hooks = {}) {
     then(resolve, reject) { return Promise.resolve(result).then(resolve, reject); },
   };
 }
+
+test('claimSalesforceOutboxJobs calls bounded atomic RPC', async () => {
+  let received;
+  const db = loadDb({
+    rpc(name, params) { received = { name, params }; return Promise.resolve({ data: [{ id: 1 }], error: null }); },
+  });
+  assert.deepEqual(await db.claimSalesforceOutboxJobs('worker-1', 50), [{ id: 1 }]);
+  assert.deepEqual(received, { name: 'claim_salesforce_outbox_jobs', params: { p_worker_id: 'worker-1', p_limit: 10, p_lock_timeout_seconds: SALESFORCE_OUTBOX_LEASE_SECONDS } });
+  await assert.rejects(() => db.claimSalesforceOutboxJobs(''), err => err.code === 'SF_OUTBOX_WORKER_REQUIRED');
+});
+
+test('claimed job transitions delegate ownership and fresh-lease enforcement to atomic RPC', async () => {
+  let received;
+  const db = loadDb({
+    rpc(name, params) {
+      received = { name, params };
+      return Promise.resolve({ data: [], error: null });
+    },
+  });
+  await assert.rejects(() => db.markSalesforceOutboxJobSynced(4, 'worker-1'), err => err.code === 'SF_OUTBOX_LEASE_LOST' && err.statusCode === 409);
+  assert.equal(received.name, 'transition_salesforce_outbox_job');
+  assert.equal(received.params.p_job_id, 4);
+  assert.equal(received.params.p_worker_id, 'worker-1');
+  assert.equal(received.params.p_status, 'synced');
+  assert.equal(received.params.p_lock_timeout_seconds, SALESFORCE_OUTBOX_LEASE_SECONDS);
+});
 
 test('listTicketSalesforceOutboxJobs maps missing schema to controlled 503', async () => {
   const db = loadDb({
@@ -105,33 +133,18 @@ test('createSalesforceOutboxJob propagates generic Supabase errors', async () =>
   );
 });
 
-test('markSalesforceOutboxJobRetryable rejects synced or missing jobs deterministically', async () => {
+test('markSalesforceOutboxJobRetryable conflicts for active, synced, or missing jobs', async () => {
   const db = loadDb({
-    from(table) {
-      assert.equal(table, 'salesforce_outbox');
-      return {
-        update(payload) {
-          assert.equal(payload.status, 'pending');
-          assert.equal(payload.last_error, null);
-          assert.equal(payload.processed_at, null);
-          return createQuery({ data: null, error: null }, {
-            eq(field, value) {
-              assert.equal(field, 'id');
-              assert.equal(value, 12);
-            },
-            in(field, values) {
-              assert.equal(field, 'status');
-              assert.deepEqual(values, ['pending', 'retrying', 'failed']);
-            },
-          });
-        },
-      };
+    rpc(name, params) {
+      assert.equal(name, 'retry_salesforce_outbox_job');
+      assert.deepEqual(params, { p_job_id: 12 });
+      return Promise.resolve({ data: [], error: null });
     },
   });
 
   await assert.rejects(
     () => db.markSalesforceOutboxJobRetryable(12),
-    err => err.statusCode === 404 && err.code === 'SF_OUTBOX_JOB_NOT_RETRYABLE',
+    err => err.statusCode === 409 && err.code === 'SF_OUTBOX_JOB_NOT_RETRYABLE' && /not failed/i.test(err.message),
   );
 });
 
@@ -156,18 +169,17 @@ test('listTicketSalesforceOutboxJobs requests only ticket-safe outbox columns', 
 test('admin Salesforce outbox helpers request only admin-safe outbox columns', async () => {
   const selectedColumns = [];
   const db = loadDb({
+    rpc(name, params) {
+      assert.equal(name, 'retry_salesforce_outbox_job');
+      assert.deepEqual(params, { p_job_id: 1 });
+      return Promise.resolve({ data: [{ id: 1, ticket_id: 7, status: 'pending', operation: 'case_close' }], error: null });
+    },
     from(table) {
       assert.equal(table, 'salesforce_outbox');
       return {
         select(columns) {
           selectedColumns.push(columns);
           return createQuery({ data: [{ id: 1, ticket_id: 7, status: 'failed', operation: 'case_close' }], error: null });
-        },
-        update(payload) {
-          assert.equal(payload.status, 'pending');
-          return createQuery({ data: { id: 1, ticket_id: 7, status: 'pending', operation: 'case_close' }, error: null }, {
-            select(columns) { selectedColumns.push(columns); },
-          });
         },
       };
     },
@@ -177,7 +189,6 @@ test('admin Salesforce outbox helpers request only admin-safe outbox columns', a
   await db.markSalesforceOutboxJobRetryable(1);
 
   assert.deepEqual(selectedColumns, [
-    'id,ticket_id,sf_case_id,operation,status,attempts,next_attempt_at,processed_at,created_at,updated_at',
     'id,ticket_id,sf_case_id,operation,status,attempts,next_attempt_at,processed_at,created_at,updated_at',
   ]);
   assert.equal(selectedColumns.some(columns => columns === '*' || /payload|idempotency_key|last_error/.test(columns)), false);

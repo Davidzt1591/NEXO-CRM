@@ -263,6 +263,48 @@ router.post('/salesforce-outbox/:id/retry', asyncHandler(async (req, res) => {
   res.json({ job: salesforceOutbox.serializeAdminOutboxJob(job) });
 }));
 
+router.post('/salesforce-outbox/process', asyncHandler(async (req, res) => {
+  const limit = salesforceOutbox.normalizeProcessLimit(req.body?.limit);
+  try {
+    const summary = await salesforceOutbox.processBatch({ db, limit });
+    const auditAction = summary.diagnosis && ['processor_failure', 'claim_failure', 'terminal_failure'].includes(summary.diagnosis.category)
+      ? 'salesforce_outbox.process_failed'
+      : 'salesforce_outbox.processed';
+    let auditPersisted = true;
+    try {
+      await audit(req, auditAction, null, {
+        limit,
+        failed: summary.counts.failed,
+        retrying: summary.counts.retrying,
+        lease_lost: summary.counts.lease_lost,
+        processor_error: summary.counts.processor_error,
+        synced: summary.counts.synced,
+        claimed: summary.counts.claimed,
+        duration_ms: summary.duration_ms,
+        recovery: summary.recovery,
+        invocation: summary.invocation,
+        external_alerting: summary.external_alerting,
+        error_code: summary.diagnosis?.error_code || null,
+        error_category: summary.diagnosis?.category || null,
+      });
+    } catch (_auditError) {
+      auditPersisted = false;
+      console.error('[salesforce_outbox] processor_audit_persist_failed');
+    }
+    res.json({
+      ...summary,
+      audit_persisted: auditPersisted,
+      warnings: auditPersisted ? [] : ['PROCESSOR_AUDIT_PERSIST_FAILED'],
+    });
+  } catch (error) {
+    const classified = salesforceOutbox.classifyProcessorError(error);
+    await audit(req, 'salesforce_outbox.process_failed', null, {
+      limit, error_code: classified.code, recovery: 'manual_admin_invocation_required',
+    });
+    throw error;
+  }
+}));
+
 // ── Routing / Queue ────────────────────────────────────────────────────────
 router.get('/queue', asyncHandler(async (req, res) => {
   const tickets = routing.enrichTickets(await db.getTicketsWithRouting());

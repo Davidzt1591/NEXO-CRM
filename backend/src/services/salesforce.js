@@ -9,6 +9,7 @@ const SF_LOGIN_URL  = process.env.SALESFORCE_LOGIN_URL    || 'https://magneto365
 const SF_VERSION    = process.env.SALESFORCE_API_VERSION  || 'v60.0';
 const CLIENT_ID     = process.env.SALESFORCE_CLIENT_ID;
 const CLIENT_SECRET = process.env.SALESFORCE_CLIENT_SECRET;
+const { SALESFORCE_REQUEST_TIMEOUT_MS: SF_REQUEST_TIMEOUT_MS } = require('./salesforceOutboxContract');
 
 // ── In-memory caches ──────────────────────────────────────────────────────────
 let tokenCache = {
@@ -29,9 +30,33 @@ const jwt = require('jsonwebtoken');
 const fs = require('fs');
 const path = require('path');
 const { ALLOWED_MIMETYPES, hasMagicBytes, normalizeBase64, sanitizeFilename } = require('./mediaValidation');
-const { redactForLog, redactTextForLog } = require('../utils/redact');
+const { redactForLog } = require('../utils/redact');
 
 const DEFAULT_PRIVATE_KEY_PATH = path.resolve(__dirname, '..', '..', 'certs', 'salesforce.key');
+
+async function fetchWithSalesforceTimeout(url, options = {}, consume, timeoutMs = SF_REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { ...options, signal: controller.signal });
+    return await consume(response, controller.signal);
+  } catch (error) {
+    if (controller.signal.aborted || error?.name === 'AbortError') {
+      const timeoutError = new Error('Salesforce request timed out.');
+      timeoutError.code = 'SF_REQUEST_TIMEOUT';
+      timeoutError.statusCode = 408;
+      throw timeoutError;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function parseJsonText(text) {
+  if (!text) return null;
+  try { return JSON.parse(text); } catch { return null; }
+}
 
 function resolveSalesforcePrivateKey(env = process.env, fsModule = fs) {
   if (env.SALESFORCE_PRIVATE_KEY) {
@@ -55,15 +80,18 @@ function resolveSalesforcePrivateKey(env = process.env, fsModule = fs) {
 }
 
 function buildSafeSalesforceErrorMessage(status, body) {
-  const redactedBody = redactForLog(body);
-  const msg = Array.isArray(redactedBody)
-    ? redactedBody[0]?.message
-    : (redactedBody?.message || JSON.stringify(redactedBody));
-  const fields = Array.isArray(redactedBody)
-    ? redactedBody.map(e => e.fields?.join(', ')).filter(Boolean).join(', ')
-    : '';
+  const first = Array.isArray(body) ? body[0] : body;
+  const rawCode = String(first?.errorCode || first?.code || '').toUpperCase();
+  const code = /^[A-Z0-9_:-]{1,120}$/.test(rawCode) ? rawCode : `SF_HTTP_${status}`;
+  return `Salesforce request failed (${Number(status) || 'unknown'}, ${code}).`;
+}
 
-  return `SF API ${status}: ${msg || 'Salesforce request failed.'}${fields ? ` [Campos: ${fields}]` : ''}`;
+function createSalesforceError(status, body) {
+  const err = new Error(buildSafeSalesforceErrorMessage(status, body));
+  err.statusCode = Number(status) || undefined;
+  const first = Array.isArray(body) ? body[0] : body;
+  err.code = String(first?.errorCode || first?.code || `SF_HTTP_${status}`).toUpperCase();
+  return err;
 }
 
 async function getToken(force = false) {
@@ -99,19 +127,19 @@ async function getToken(force = false) {
       assertion: assertion
     });
 
-    const res = await fetch(`${SF_LOGIN_URL}/services/oauth2/token`, {
+    const result = await fetchWithSalesforceTimeout(`${SF_LOGIN_URL}/services/oauth2/token`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: params.toString()
-    });
+    }, async res => ({ status: res.status, ok: res.ok, text: await res.text() }));
 
-    if (res.ok) {
-      const data = await res.json();
+    if (result.ok) {
+      const data = parseJsonText(result.text) || {};
       accessToken = data.access_token;
       console.log('🔑 JWT Bearer token obtenido de Salesforce exitosamente.');
     } else {
-      const err = await res.text();
-      console.warn(`⚠️  Falló autenticación JWT (${res.status}): ${redactTextForLog(err)}. Reintentando con credenciales básicas...`);
+      const error = createSalesforceError(result.status, parseJsonText(result.text));
+      console.warn(`⚠️  Falló autenticación JWT (${result.status}, ${error.code}). Reintentando con credenciales básicas...`);
     }
   }
 
@@ -127,18 +155,17 @@ async function getToken(force = false) {
       client_secret : CLIENT_SECRET,
     });
 
-    const res = await fetch(`${SF_LOGIN_URL}/services/oauth2/token`, {
+    const result = await fetchWithSalesforceTimeout(`${SF_LOGIN_URL}/services/oauth2/token`, {
       method  : 'POST',
       headers : { 'Content-Type': 'application/x-www-form-urlencoded' },
       body    : params.toString(),
-    });
+    }, async res => ({ status: res.status, ok: res.ok, text: await res.text() }));
 
-    if (!res.ok) {
-      const err = await res.text();
-      throw new Error(`SF Auth Error (${res.status}): ${redactTextForLog(err)}`);
+    if (!result.ok) {
+      throw createSalesforceError(result.status, parseJsonText(result.text));
     }
 
-    const data = await res.json();
+    const data = parseJsonText(result.text) || {};
     accessToken = data.access_token;
   }
 
@@ -152,11 +179,11 @@ async function getToken(force = false) {
 async function _fetchOwnerInfo(token, idUrl) {
   if (!idUrl) return;
   try {
-    const res = await fetch(idUrl, {
+    const result = await fetchWithSalesforceTimeout(idUrl, {
       headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }
-    });
-    if (res.ok) {
-      const data       = await res.json();
+    }, async res => ({ ok: res.ok, text: await res.text() }));
+    if (result.ok) {
+      const data = parseJsonText(result.text) || {};
       tokenCache.ownerInfo = {
         userId      : data.user_id,
         displayName : data.display_name,
@@ -172,7 +199,7 @@ async function _fetchOwnerInfo(token, idUrl) {
 
 // ── Base Request (with 401 auto-retry) ───────────────────────────────────────
 
-async function sfRequest(method, path, body = null, extraHeaders = {}, isRetry = false) {
+async function sfRequest(method, path, body = null, extraHeaders = {}, isRetry = false, timeoutMs = SF_REQUEST_TIMEOUT_MS) {
   const token = await getToken();
   const url   = `${SF_INSTANCE}/services/data/${SF_VERSION}${path}`;
 
@@ -187,28 +214,41 @@ async function sfRequest(method, path, body = null, extraHeaders = {}, isRetry =
 
   if (body !== null) opts.body = JSON.stringify(body);
 
-  const res = await fetch(url, opts);
+  const result = await fetchWithSalesforceTimeout(url, opts, async res => ({
+    status: res.status,
+    ok: res.ok,
+    text: res.status === 204 ? '' : await res.text(),
+  }), timeoutMs);
 
   // Auto-refresh on 401
-  if (res.status === 401 && !isRetry) {
+  if (result.status === 401 && !isRetry) {
     console.warn('🔄 Token SF expirado. Refrescando y reintentando...');
     tokenCache.accessToken = null;
     tokenCache.expiresAt   = 0;
-    return sfRequest(method, path, body, extraHeaders, true);
+    return sfRequest(method, path, body, extraHeaders, true, timeoutMs);
   }
 
   // PATCH success has no body
-  if (res.status === 204) return { success: true };
+  if (result.status === 204) return { success: true };
 
-  const text = await res.text();
-  if (!text) return null;
+  const text = result.text;
+  if (!text) {
+    if (!result.ok) throw createSalesforceError(result.status, null);
+    return null;
+  }
 
   let json;
-  try { json = JSON.parse(text); } catch { throw new Error(`SF respuesta inválida: ${redactTextForLog(text.slice(0, 200))}`); }
+  try { json = JSON.parse(text); } catch {
+    const err = new Error(`SF API ${result.status}: invalid response.`);
+    err.statusCode = result.status;
+    err.code = 'SF_INVALID_RESPONSE';
+    throw err;
+  }
 
-  if (!res.ok) {
-    console.error('❌ SF Error Response:', JSON.stringify(redactForLog(json), null, 2));
-    throw new Error(buildSafeSalesforceErrorMessage(res.status, json));
+  if (!result.ok) {
+    const error = createSalesforceError(result.status, json);
+    console.error('❌ Salesforce request failed:', { status: result.status, code: error.code });
+    throw error;
   }
 
   return json;
@@ -249,6 +289,20 @@ async function obtenerCase(id) {
   }
 
   return data;
+}
+
+async function getCaseCloseState(id) {
+  if (!id) throw new Error('Salesforce Case id is required.');
+  return sfRequest('GET', `/sobjects/Case/${encodeURIComponent(id)}?fields=Id,Status,Subetapa_resuelto__c`);
+}
+
+async function closeCaseFromOutbox(id, substage) {
+  if (!id || !substage) throw new Error('Salesforce Case id and resolution substage are required.');
+  await sfRequest('PATCH', `/sobjects/Case/${encodeURIComponent(id)}`, {
+    Status: 'Resuelto',
+    Subetapa_resuelto__c: substage,
+  }, AUTO_ASSIGN_HEADER);
+  return { success: true };
 }
 
 async function crearCase(payload) {
@@ -536,12 +590,16 @@ function normalizeAccountSearchText(texto) {
 }
 
 module.exports = {
+  SF_REQUEST_TIMEOUT_MS,
+  sfRequest,
   DEFAULT_PRIVATE_KEY_PATH,
   resolveSalesforcePrivateKey,
   getToken,
   getOwnerInfo,
   crearCase,
   obtenerCase,
+  getCaseCloseState,
+  closeCaseFromOutbox,
   getDescribe,
   actualizarCase,
   cerrarCase,
@@ -551,6 +609,7 @@ module.exports = {
   buscarCuentas,
   normalizeAccountSearchText,
   buildSafeSalesforceErrorMessage,
+  createSalesforceError,
   __setTokenCacheForTests,
   __resetCachesForTests,
 };

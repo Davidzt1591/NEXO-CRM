@@ -953,28 +953,76 @@ async function listSalesforceOutboxJobs(filters = {}) {
 }
 
 async function markSalesforceOutboxJobRetryable(id) {
-  const { data, error } = await supabase
-    .from('salesforce_outbox')
-    .update({
-      status: 'pending',
-      last_error: null,
-      next_attempt_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-      processed_at: null,
-    })
-    .eq('id', id)
-    .in('status', ['pending', 'retrying', 'failed'])
-    .select(salesforceOutbox.ADMIN_OUTBOX_SAFE_SELECT)
-    .maybeSingle();
+  const { data, error } = await supabase.rpc('retry_salesforce_outbox_job', { p_job_id: id });
 
   if (error) handleSalesforceOutboxError(error, 'marcar retry');
-  if (!data) {
-    const err = new Error('Salesforce outbox job was not found or is already synced.');
-    err.statusCode = 404;
+  const job = Array.isArray(data) ? data[0] : data;
+  if (!job) {
+    const err = new Error('Salesforce outbox job was not found or is not failed.');
+    err.statusCode = 409;
     err.code = 'SF_OUTBOX_JOB_NOT_RETRYABLE';
     throw err;
   }
-  return data;
+  return salesforceOutbox.serializeAdminOutboxJob(job);
+}
+
+async function claimSalesforceOutboxJobs(workerId, limit = 1) {
+  const { SALESFORCE_OUTBOX_LEASE_SECONDS } = require('../services/salesforceOutboxContract');
+  if (!workerId || !String(workerId).trim()) {
+    const err = new Error('Salesforce outbox worker id is required.');
+    err.code = 'SF_OUTBOX_WORKER_REQUIRED';
+    throw err;
+  }
+  const safeLimit = Math.min(Math.max(Number(limit) || 1, 1), 10);
+  const { data, error } = await supabase.rpc('claim_salesforce_outbox_jobs', {
+    p_worker_id: String(workerId),
+    p_limit: safeLimit,
+    p_lock_timeout_seconds: SALESFORCE_OUTBOX_LEASE_SECONDS,
+  });
+  if (error) handleSalesforceOutboxError(error, 'claim jobs');
+  return data || [];
+}
+
+async function transitionClaimedSalesforceOutboxJob(id, workerId, changes, context) {
+  const { SALESFORCE_OUTBOX_LEASE_SECONDS } = require('../services/salesforceOutboxContract');
+  const { data, error } = await supabase.rpc('transition_salesforce_outbox_job', {
+    p_job_id: id,
+    p_worker_id: workerId,
+    p_status: changes.status,
+    p_last_error: changes.last_error ?? null,
+    p_next_attempt_at: changes.next_attempt_at ?? null,
+    p_processed_at: changes.processed_at ?? null,
+    p_lock_timeout_seconds: SALESFORCE_OUTBOX_LEASE_SECONDS,
+  });
+  if (error) handleSalesforceOutboxError(error, context);
+  const job = Array.isArray(data) ? data[0] : data;
+  if (!job) {
+    const err = new Error('Salesforce outbox lease was lost.');
+    err.code = 'SF_OUTBOX_LEASE_LOST';
+    err.statusCode = 409;
+    throw err;
+  }
+  return job;
+}
+
+function markSalesforceOutboxJobSynced(id, workerId, processedAt = new Date().toISOString()) {
+  return transitionClaimedSalesforceOutboxJob(id, workerId, {
+    status: 'synced', last_error: null, processed_at: processedAt, next_attempt_at: processedAt,
+  }, 'mark synced');
+}
+
+function markSalesforceOutboxJobRetrying(id, workerId, { nextAttemptAt, errorCode }) {
+  return transitionClaimedSalesforceOutboxJob(id, workerId, {
+    status: 'retrying', last_error: String(errorCode || 'SF_RETRYABLE').slice(0, 120),
+    next_attempt_at: nextAttemptAt, processed_at: null,
+  }, 'mark retrying');
+}
+
+function markSalesforceOutboxJobFailed(id, workerId, errorCode, processedAt = new Date().toISOString()) {
+  return transitionClaimedSalesforceOutboxJob(id, workerId, {
+    status: 'failed', last_error: String(errorCode || 'SF_TERMINAL').slice(0, 120),
+    processed_at: processedAt,
+  }, 'mark failed');
 }
 
 // Mock closing for Supabase (no active connections/intervals to clear like SQLite)
@@ -1045,5 +1093,9 @@ module.exports = {
   getSalesforceOutboxJobByIdempotencyKey,
   listTicketSalesforceOutboxJobs,
   listSalesforceOutboxJobs,
-  markSalesforceOutboxJobRetryable
+  markSalesforceOutboxJobRetryable,
+  claimSalesforceOutboxJobs,
+  markSalesforceOutboxJobSynced,
+  markSalesforceOutboxJobRetrying,
+  markSalesforceOutboxJobFailed
 };
