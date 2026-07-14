@@ -7,6 +7,7 @@ const router  = express.Router();
 const db      = require('../database/db');
 const botFlow = require('../services/botFlow');
 const routing = require('../services/routing');
+const salesforceOutbox = require('../services/salesforceOutbox');
 const { emitRoutingUpdate } = require('../socket');
 
 const asyncHandler = fn => (req, res) =>
@@ -243,6 +244,23 @@ router.get('/audit', asyncHandler(async (req, res) => {
 router.get('/reports/summary', asyncHandler(async (req, res) => {
   const summary = await db.getAdminReportSummary();
   res.json(summary);
+}));
+
+// ── Salesforce Outbox ───────────────────────────────────────────────────────
+router.get('/salesforce-outbox', asyncHandler(async (req, res) => {
+  const filters = salesforceOutbox.normalizeListFilters(req.query);
+  const jobs = await db.listSalesforceOutboxJobs(filters);
+  res.json({ jobs: jobs.map(salesforceOutbox.serializeAdminOutboxJob), filters });
+}));
+
+router.post('/salesforce-outbox/:id/retry', asyncHandler(async (req, res) => {
+  const id = requiredPositiveInteger(req.params.id, 'id');
+  const job = await db.markSalesforceOutboxJobRetryable(id);
+  await audit(req, 'salesforce_outbox.retry', job.id, {
+    ticket_id: job.ticket_id,
+    operation: job.operation,
+  });
+  res.json({ job: salesforceOutbox.serializeAdminOutboxJob(job) });
 }));
 
 // ── Routing / Queue ────────────────────────────────────────────────────────

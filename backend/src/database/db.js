@@ -5,6 +5,7 @@
 
 const { createClient } = require('@supabase/supabase-js');
 const crypto = require('crypto');
+const salesforceOutbox = require('../services/salesforceOutbox');
 
 const supabaseUrl = process.env.SUPABASE_URL;
 // Server-side backend operations use admin/RLS-protected tables; prefer service_role.
@@ -868,6 +869,114 @@ async function updateBotFlowStep(id, changes) {
   return data;
 }
 
+function handleSalesforceOutboxError(error, context) {
+  if (salesforceOutbox.isSchemaMissingError(error)) {
+    throw salesforceOutbox.toSchemaMissingError(error);
+  }
+  console.error(`❌ Error Supabase en Salesforce outbox (${context}):`, error.message);
+  throw error;
+}
+
+function isUniqueViolation(error) {
+  return error?.code === '23505' || /duplicate key value|unique constraint|unique violation/i.test(error?.message || '');
+}
+
+async function getSalesforceOutboxJobByIdempotencyKey(idempotencyKey) {
+  const { data, error } = await supabase
+    .from('salesforce_outbox')
+    .select('*')
+    .eq('idempotency_key', idempotencyKey)
+    .maybeSingle();
+
+  if (error) handleSalesforceOutboxError(error, 'buscar por idempotency_key');
+  return data || null;
+}
+
+async function createSalesforceOutboxJob(job) {
+  const payload = {
+    ticket_id: job.ticket_id,
+    sf_case_id: job.sf_case_id || null,
+    operation: salesforceOutbox.normalizeOperation(job.operation),
+    status: salesforceOutbox.normalizeStatus(job.status || 'pending'),
+    payload: job.payload || {},
+    idempotency_key: job.idempotency_key,
+    next_attempt_at: job.next_attempt_at || new Date().toISOString(),
+  };
+
+  const { data, error } = await supabase
+    .from('salesforce_outbox')
+    .insert(payload)
+    .select()
+    .single();
+
+  if (error) {
+    if (isUniqueViolation(error)) {
+      const existing = await getSalesforceOutboxJobByIdempotencyKey(payload.idempotency_key);
+      if (existing) return { ...existing, duplicate: true };
+    }
+    handleSalesforceOutboxError(error, 'crear job');
+  }
+
+  return data;
+}
+
+async function listTicketSalesforceOutboxJobs(ticketId, options = {}) {
+  const filters = salesforceOutbox.normalizeListFilters({ ...options, ticket_id: ticketId });
+  let query = supabase
+    .from('salesforce_outbox')
+    .select(salesforceOutbox.TICKET_OUTBOX_SAFE_SELECT)
+    .eq('ticket_id', filters.ticket_id)
+    .order('created_at', { ascending: false })
+    .range(filters.offset, filters.offset + filters.limit - 1);
+
+  if (filters.status) query = query.eq('status', filters.status);
+
+  const { data, error } = await query;
+  if (error) handleSalesforceOutboxError(error, 'listar por ticket');
+  return data || [];
+}
+
+async function listSalesforceOutboxJobs(filters = {}) {
+  const normalized = salesforceOutbox.normalizeListFilters(filters);
+  let query = supabase
+    .from('salesforce_outbox')
+    .select(salesforceOutbox.ADMIN_OUTBOX_SAFE_SELECT)
+    .order('created_at', { ascending: false })
+    .range(normalized.offset, normalized.offset + normalized.limit - 1);
+
+  if (normalized.status) query = query.eq('status', normalized.status);
+  if (normalized.ticket_id) query = query.eq('ticket_id', normalized.ticket_id);
+
+  const { data, error } = await query;
+  if (error) handleSalesforceOutboxError(error, 'listar admin');
+  return data || [];
+}
+
+async function markSalesforceOutboxJobRetryable(id) {
+  const { data, error } = await supabase
+    .from('salesforce_outbox')
+    .update({
+      status: 'pending',
+      last_error: null,
+      next_attempt_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      processed_at: null,
+    })
+    .eq('id', id)
+    .in('status', ['pending', 'retrying', 'failed'])
+    .select(salesforceOutbox.ADMIN_OUTBOX_SAFE_SELECT)
+    .maybeSingle();
+
+  if (error) handleSalesforceOutboxError(error, 'marcar retry');
+  if (!data) {
+    const err = new Error('Salesforce outbox job was not found or is already synced.');
+    err.statusCode = 404;
+    err.code = 'SF_OUTBOX_JOB_NOT_RETRYABLE';
+    throw err;
+  }
+  return data;
+}
+
 // Mock closing for Supabase (no active connections/intervals to clear like SQLite)
 function initDb() { return Promise.resolve(true); }
 function persistDb() { return Promise.resolve(true); }
@@ -930,5 +1039,11 @@ module.exports = {
   listActiveBotFlows,
   listBotFlows,
   createBotFlowStep,
-  updateBotFlowStep
+  updateBotFlowStep,
+  // Salesforce Outbox
+  createSalesforceOutboxJob,
+  getSalesforceOutboxJobByIdempotencyKey,
+  listTicketSalesforceOutboxJobs,
+  listSalesforceOutboxJobs,
+  markSalesforceOutboxJobRetryable
 };

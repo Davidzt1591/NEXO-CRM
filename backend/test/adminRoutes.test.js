@@ -122,6 +122,8 @@ function createMockDb(overrides = {}) {
     listBotFlows: async () => [{ id: 1, step_key: 'initial_filter', message: 'Hola', version_id: 1, area_id: null, active: true, sort_order: 0 }],
     createBotFlowStep: async payload => ({ id: 4, ...payload }),
     updateBotFlowStep: async (id, payload) => ({ id, step_key: 'ask_name', version_id: 1, area_id: null, message: 'Nombre', sort_order: 0, active: true, ...payload }),
+    listSalesforceOutboxJobs: async () => [],
+    markSalesforceOutboxJobRetryable: async id => ({ id, ticket_id: 7, operation: 'case_close', status: 'pending' }),
     ...overrides,
   };
 }
@@ -258,6 +260,86 @@ test('/api/admin reports summary returns aggregate payload', async () => {
     const res = await request(baseUrl, 'GET', '/api/admin/reports/summary');
     assert.equal(res.status, 200);
     assert.deepEqual(res.body, summary);
+  });
+});
+
+test('/api/admin lists Salesforce outbox jobs with normalized filters', async () => {
+  let receivedFilters;
+  const jobs = [{
+    id: 1,
+    ticket_id: 7,
+    status: 'failed',
+    operation: 'case_close',
+    payload: { transcript: 'secret transcript' },
+    idempotency_key: 'secret-idempotency-key',
+    last_error: 'raw Supabase error with token=secret',
+  }];
+  await withServer(createMockDb({
+    listSalesforceOutboxJobs: async filters => { receivedFilters = filters; return jobs; },
+  }), { role: 'admin', name: 'Admin' }, async (baseUrl) => {
+    const res = await request(baseUrl, 'GET', '/api/admin/salesforce-outbox?status=failed&ticket_id=7&limit=500&offset=2');
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body.jobs, [{
+      id: 1,
+      ticket_id: 7,
+      sf_case_id: null,
+      operation: 'case_close',
+      status: 'failed',
+      attempts: null,
+      next_attempt_at: null,
+      processed_at: null,
+      created_at: null,
+      updated_at: null,
+    }]);
+    assert.equal(res.body.jobs[0].payload, undefined);
+    assert.equal(res.body.jobs[0].idempotency_key, undefined);
+    assert.equal(res.body.jobs[0].last_error, undefined);
+    assert.deepEqual(receivedFilters, { status: 'failed', ticket_id: 7, limit: 200, offset: 2 });
+  });
+});
+
+test('/api/admin retries Salesforce outbox job locally without Salesforce calls', async () => {
+  const audits = [];
+  let retriedId;
+  await withServer(createMockDb({
+    markSalesforceOutboxJobRetryable: async id => {
+      retriedId = id;
+      return {
+        id,
+        ticket_id: 7,
+        operation: 'case_close',
+        status: 'pending',
+        payload: { transcript: 'secret transcript' },
+        idempotency_key: 'secret-idempotency-key',
+        last_error: 'raw Supabase error with token=secret',
+      };
+    },
+    logAudit: async payload => { audits.push(payload); return { id: 1 }; },
+  }), { role: 'admin', name: 'Root' }, async (baseUrl) => {
+    const res = await request(baseUrl, 'POST', '/api/admin/salesforce-outbox/12/retry');
+    assert.equal(res.status, 200);
+    assert.equal(retriedId, 12);
+    assert.equal(res.body.job.status, 'pending');
+    assert.equal(res.body.job.payload, undefined);
+    assert.equal(res.body.job.idempotency_key, undefined);
+    assert.equal(res.body.job.last_error, undefined);
+    assert.equal(audits[0].action, 'salesforce_outbox.retry');
+    assert.deepEqual(audits[0].metadata, { ticket_id: 7, operation: 'case_close' });
+  });
+});
+
+test('/api/admin Salesforce outbox missing schema returns controlled 503', async () => {
+  await withServer(createMockDb({
+    listSalesforceOutboxJobs: async () => {
+      const err = new Error('Salesforce outbox schema is not available.');
+      err.statusCode = 503;
+      err.code = 'SF_OUTBOX_SCHEMA_MISSING';
+      throw err;
+    },
+  }), { role: 'admin', name: 'Admin' }, async (baseUrl) => {
+    const res = await request(baseUrl, 'GET', '/api/admin/salesforce-outbox');
+    assert.equal(res.status, 503);
+    assert.deepEqual(res.body, { error: 'Salesforce outbox schema is not available.' });
   });
 });
 

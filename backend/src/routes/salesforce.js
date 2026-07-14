@@ -7,6 +7,7 @@ const router  = express.Router();
 const sf      = require('../services/salesforce');
 const ticketClose = require('../services/ticketClose');
 const db = require('../database/db');
+const salesforceOutbox = require('../services/salesforceOutbox');
 const { canAccessTicket } = require('../realtime/operational');
 const { redactTextForLog } = require('../utils/redact');
 
@@ -84,6 +85,18 @@ async function bindCreatedCaseToTicket(ticketId, result) {
 router.get('/me', asyncHandler(async (req, res) => {
   const info = await sf.getOwnerInfo();
   res.json(info || { error: 'No configurado' });
+}));
+
+// ── GET /api/sf/tickets/:ticket_id/outbox — Ticket-scoped outbox status ─────
+router.get('/tickets/:ticket_id/outbox', asyncHandler(async (req, res) => {
+  await requireTicketAccess(req, req.params.ticket_id);
+  const filters = salesforceOutbox.normalizeListFilters({
+    status: req.query.status,
+    limit: req.query.limit,
+    offset: req.query.offset,
+  });
+  const jobs = await db.listTicketSalesforceOutboxJobs(req.params.ticket_id, filters);
+  res.json({ jobs: jobs.map(salesforceOutbox.serializeTicketOutboxJob) });
 }));
 
 // ── GET /api/sf/describe — Picklists en vivo ────────────────────────────────

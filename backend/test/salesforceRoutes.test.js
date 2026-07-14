@@ -221,18 +221,32 @@ test('Salesforce ticket-aware close validates required fields before local close
   });
 });
 
-test('Salesforce ticket-aware close allows authorized analyst', async () => {
+test('Salesforce ticket-aware close returns pending outbox status for authorized analyst without direct Salesforce close', async () => {
   let closeArgs;
+  let sfCloseCalled = false;
   const mockDb = {
     getTicketWithAssignment: async () => ({ id: 7, area_id: 2, assignment: null, sf_case_id: '500xx' }),
     getAnalystByTokenId: async () => ({ id: 10, area_id: 2 }),
   };
+  const mockSf = {
+    cerrarCase: async () => { sfCloseCalled = true; },
+  };
   const mockClose = {
     validateSalesforceCloseFields,
-    closeTicket: async args => { closeArgs = args; return { success: true }; },
+    closeTicket: async args => {
+      closeArgs = args;
+      return {
+        ticketId: args.ticketId,
+        ticket: { id: args.ticketId, status: 'closed' },
+        salesforceStatus: 'pending',
+        salesforceCloseStatus: 'pending',
+        salesforceOutboxStatus: 'pending',
+        salesforceOutboxJob: { id: 99, ticket_id: args.ticketId, operation: 'case_close', status: 'pending' },
+      };
+    },
   };
 
-  await withServer({ mockDb, mockClose, user: { id: 1, role: 'analyst', name: 'Analyst' } }, async baseUrl => {
+  await withServer({ mockDb, mockSf, mockClose, user: { id: 1, role: 'analyst', name: 'Analyst' } }, async baseUrl => {
     const res = await postJson(baseUrl, '/api/sf/cases/500xx/close', {
       ticket_id: 7,
       resolucion: 'ok',
@@ -241,10 +255,15 @@ test('Salesforce ticket-aware close allows authorized analyst', async () => {
     assert.equal(res.status, 200);
     assert.equal(closeArgs.ticketId, 7);
     assert.equal(closeArgs.closeSalesforce, true);
+    assert.equal(sfCloseCalled, false);
+    assert.equal(res.body.salesforceStatus, 'pending');
+    assert.equal(res.body.salesforceCloseStatus, 'pending');
+    assert.equal(res.body.salesforceOutboxStatus, 'pending');
+    assert.equal(res.body.salesforceOutboxJob.status, 'pending');
   });
 });
 
-test('Salesforce ticket-aware close returns non-2xx when Salesforce close orchestration fails', async () => {
+test('Salesforce ticket-aware close returns non-2xx when Salesforce outbox enqueue fails', async () => {
   let closeCalled = false;
   const mockDb = {
     getTicketWithAssignment: async () => ({ id: 7, area_id: 2, assignment: null, sf_case_id: '500xx' }),
@@ -254,9 +273,38 @@ test('Salesforce ticket-aware close returns non-2xx when Salesforce close orches
     validateSalesforceCloseFields,
     closeTicket: async () => {
       closeCalled = true;
-      const err = new Error('sf close failed');
+      const err = new Error('Salesforce outbox schema is not available.');
+      err.statusCode = 503;
+      err.code = 'SF_OUTBOX_SCHEMA_MISSING';
+      throw err;
+    },
+  };
+
+  await withServer({ mockDb, mockClose, user: { id: 1, role: 'admin', name: 'Admin' } }, async baseUrl => {
+    const res = await postJson(baseUrl, '/api/sf/cases/500xx/close', {
+      ticket_id: 7,
+      resolucion: 'ok',
+      subetapa_resuelto: 'Solucionado',
+    });
+    assert.equal(closeCalled, true);
+    assert.equal(res.status, 503);
+    assert.equal(res.body.code, 'SF_OUTBOX_SCHEMA_MISSING');
+  });
+});
+
+test('Salesforce ticket-aware close returns controlled code for generic outbox enqueue failure', async () => {
+  let closeCalled = false;
+  const mockDb = {
+    getTicketWithAssignment: async () => ({ id: 7, area_id: 2, assignment: null, sf_case_id: '500xx' }),
+    getAnalystByTokenId: async () => null,
+  };
+  const mockClose = {
+    validateSalesforceCloseFields,
+    closeTicket: async () => {
+      closeCalled = true;
+      const err = new Error('No se pudo encolar el cierre de Salesforce. El ticket local no fue cerrado.');
       err.statusCode = 502;
-      err.code = 'SF_CLOSE_FAILED';
+      err.code = 'SF_OUTBOX_ENQUEUE_FAILED';
       throw err;
     },
   };
@@ -269,7 +317,8 @@ test('Salesforce ticket-aware close returns non-2xx when Salesforce close orches
     });
     assert.equal(closeCalled, true);
     assert.equal(res.status, 502);
-    assert.equal(res.body.code, 'SF_CLOSE_FAILED');
+    assert.equal(res.body.code, 'SF_OUTBOX_ENQUEUE_FAILED');
+    assert.doesNotMatch(res.body.error, /duplicate key|23505|Supabase/i);
   });
 });
 
@@ -288,6 +337,76 @@ test('Salesforce case read requires ticket_id before Salesforce call', async () 
     assert.equal(res.status, 400);
     assert.equal(sfCalled, false);
     assert.match(res.body.error, /ticket_id/);
+  });
+});
+
+test('Salesforce ticket outbox status enforces ticket-scoped authorization', async () => {
+  let listed = false;
+  const mockDb = {
+    getTicketWithAssignment: async id => ({ id, area_id: 2, assignment: null }),
+    getAnalystByTokenId: async () => ({ id: 10, area_id: 3 }),
+    listTicketSalesforceOutboxJobs: async () => { listed = true; return []; },
+  };
+
+  await withServer({ mockDb, mockClose: { validateSalesforceCloseFields, closeTicket: async () => null }, user: { id: 1, role: 'analyst', name: 'Analyst' } }, async baseUrl => {
+    const res = await requestJson(baseUrl, 'GET', '/api/sf/tickets/7/outbox');
+    assert.equal(res.status, 403);
+    assert.equal(listed, false);
+  });
+});
+
+test('Salesforce ticket outbox status returns jobs for authorized ticket without Salesforce call', async () => {
+  let listArgs;
+  let sfCalled = false;
+  const jobs = [{ id: 1, ticket_id: 7, status: 'pending', operation: 'case_close', payload: { transcript: 'secret' }, idempotency_key: 'secret-key', last_error: 'raw error' }];
+  const mockDb = {
+    getTicketWithAssignment: async id => ({ id, area_id: 2, assignment: null }),
+    getAnalystByTokenId: async () => ({ id: 10, area_id: 2 }),
+    listTicketSalesforceOutboxJobs: async (ticketId, filters) => { listArgs = { ticketId, filters }; return jobs; },
+  };
+  const mockSf = { obtenerCase: async () => { sfCalled = true; } };
+
+  await withServer({ mockDb, mockSf, mockClose: { validateSalesforceCloseFields, closeTicket: async () => null }, user: { id: 1, role: 'analyst', name: 'Analyst' } }, async baseUrl => {
+    const res = await requestJson(baseUrl, 'GET', '/api/sf/tickets/7/outbox?status=pending&limit=5&offset=1');
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body, {
+      jobs: [{
+        id: 1,
+        ticket_id: 7,
+        sf_case_id: null,
+        operation: 'case_close',
+        status: 'pending',
+        attempts: null,
+        next_attempt_at: null,
+        processed_at: null,
+        created_at: null,
+        updated_at: null,
+      }],
+    });
+    assert.equal(listArgs.ticketId, '7');
+    assert.equal(listArgs.filters.status, 'pending');
+    assert.equal(listArgs.filters.limit, 5);
+    assert.equal(listArgs.filters.offset, 1);
+    assert.equal(sfCalled, false);
+  });
+});
+
+test('Salesforce ticket outbox status maps missing schema to controlled 503', async () => {
+  const mockDb = {
+    getTicketWithAssignment: async id => ({ id, area_id: 2, assignment: null }),
+    getAnalystByTokenId: async () => null,
+    listTicketSalesforceOutboxJobs: async () => {
+      const err = new Error('Salesforce outbox schema is not available.');
+      err.statusCode = 503;
+      err.code = 'SF_OUTBOX_SCHEMA_MISSING';
+      throw err;
+    },
+  };
+
+  await withServer({ mockDb, mockClose: { validateSalesforceCloseFields, closeTicket: async () => null }, user: { id: 1, role: 'admin', name: 'Admin' } }, async baseUrl => {
+    const res = await requestJson(baseUrl, 'GET', '/api/sf/tickets/7/outbox');
+    assert.equal(res.status, 503);
+    assert.equal(res.body.code, 'SF_OUTBOX_SCHEMA_MISSING');
   });
 });
 

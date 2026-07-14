@@ -5,6 +5,7 @@ const DEFAULT_FAREWELL =
   '¡Hasta pronto! 👋 — *Equipo de Integraciones Magneto365*';
 
 const MAX_CASE_COMMENT_BYTES = 4000;
+const salesforceOutbox = require('./salesforceOutbox');
 
 function byteLength(text) {
   return Buffer.byteLength(String(text || ''), 'utf8');
@@ -101,8 +102,47 @@ async function closeTicket({
   let transcriptStatus = ticket.sf_case_id ? 'pending' : 'skipped';
   let salesforceError = null;
   let transcriptError = null;
+  let salesforceOutboxStatus = closeSalesforce && ticket.sf_case_id ? 'pending' : 'skipped';
+  let salesforceOutboxJob = null;
 
-  if (ticket.sf_case_id) {
+  if (closeSalesforce && ticket.sf_case_id) {
+    try {
+      salesforceOutboxJob = await db.createSalesforceOutboxJob(salesforceOutbox.buildOutboxJob({
+        operation: 'case_close',
+        ticket,
+        metadata: {
+          resolucion,
+          subetapa_resuelto,
+          sf_case_id: ticket.sf_case_id,
+          sf_case_number: ticket.sf_case_number || null,
+        },
+      }));
+      salesforceStatus = 'pending';
+      salesforceCloseStatus = 'pending';
+      transcriptStatus = 'skipped';
+    } catch (err) {
+      salesforceOutboxStatus = 'failed';
+      salesforceStatus = 'failed';
+      salesforceCloseStatus = 'failed';
+      salesforceError = err.message;
+      await safeAudit(db, actor, 'ticket.close_sf_outbox_failed', ticketId, {
+        sf_case_id: ticket.sf_case_id,
+        salesforce_status: salesforceStatus,
+        salesforce_close_status: salesforceCloseStatus,
+        salesforce_outbox_status: salesforceOutboxStatus,
+        error_code: err.code,
+      });
+
+      const isSchemaMissing = err.code === 'SF_OUTBOX_SCHEMA_MISSING';
+      const controlled = new Error(isSchemaMissing
+        ? err.message
+        : 'No se pudo encolar el cierre de Salesforce. El ticket local no fue cerrado.');
+      controlled.statusCode = isSchemaMissing ? (err.statusCode || 503) : 502;
+      controlled.code = isSchemaMissing ? 'SF_OUTBOX_SCHEMA_MISSING' : 'SF_OUTBOX_ENQUEUE_FAILED';
+      controlled.cause = err;
+      throw controlled;
+    }
+  } else if (ticket.sf_case_id) {
     try {
       messages = await db.getTranscriptMessages(ticketId);
       const transcript = compileTranscript(ticket, messages);
@@ -117,34 +157,8 @@ async function closeTicket({
       transcriptError = err.message;
     }
 
-    if (closeSalesforce) {
-      try {
-        await sf.cerrarCase(ticket.sf_case_id, resolucion, subetapa_resuelto);
-        salesforceCloseStatus = 'success';
-      } catch (err) {
-        salesforceCloseStatus = 'failed';
-        salesforceStatus = 'failed';
-        salesforceError = err.message;
-        await safeAudit(db, actor, 'ticket.close_sf_failed', ticketId, {
-          sf_case_id: ticket.sf_case_id,
-          salesforce_status: salesforceStatus,
-          salesforce_close_status: salesforceCloseStatus,
-          transcript_status: transcriptStatus,
-          transcript_comment_count: transcriptCommentCount,
-          message_count: messages.length,
-          transcript_error: transcriptError || undefined,
-          error: salesforceError,
-        });
-        err.statusCode = err.statusCode || 502;
-        err.code = err.code || 'SF_CLOSE_FAILED';
-        throw err;
-      }
-    }
-
-    salesforceStatus = closeSalesforce
-      ? salesforceCloseStatus
-      : (transcriptStatus === 'failed' ? 'failed' : 'success');
-    salesforceError = closeSalesforce ? null : transcriptError;
+    salesforceStatus = transcriptStatus === 'failed' ? 'failed' : 'success';
+    salesforceError = transcriptError;
   }
 
   const closedTicket = await db.closeTicket(ticketId);
@@ -164,6 +178,9 @@ async function closeTicket({
     sf_case_id: ticket.sf_case_id || null,
     salesforce_status: salesforceStatus,
     salesforce_close_status: salesforceCloseStatus,
+    salesforce_outbox_status: salesforceOutboxStatus,
+    salesforce_outbox_job_id: salesforceOutboxJob?.id,
+    salesforce_outbox_duplicate: salesforceOutboxJob?.duplicate || undefined,
     transcript_status: transcriptStatus,
     transcript_comment_count: transcriptCommentCount,
     message_count: messages.length,
@@ -177,6 +194,10 @@ async function closeTicket({
     ticket: closedTicket || ticket,
     salesforceStatus,
     salesforceCloseStatus,
+    salesforceOutboxStatus,
+    salesforceOutboxJob: salesforceOutboxJob
+      ? salesforceOutbox.serializeTicketOutboxJob(salesforceOutboxJob)
+      : null,
     salesforceError,
     transcriptStatus,
     transcriptError,
