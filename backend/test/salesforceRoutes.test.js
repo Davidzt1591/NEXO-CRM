@@ -225,7 +225,7 @@ test('Salesforce ticket-aware close returns pending outbox status for authorized
   let closeArgs;
   let sfCloseCalled = false;
   const mockDb = {
-    getTicketWithAssignment: async () => ({ id: 7, area_id: 2, assignment: null, sf_case_id: '500xx' }),
+    getTicketWithAssignment: async () => ({ id: 7, area_id: 2, assignment: { analyst_id: 10 }, sf_case_id: '500xx' }),
     getAnalystByTokenId: async () => ({ id: 10, area_id: 2 }),
   };
   const mockSf = {
@@ -360,7 +360,7 @@ test('Salesforce ticket outbox status returns jobs for authorized ticket without
   let sfCalled = false;
   const jobs = [{ id: 1, ticket_id: 7, status: 'pending', operation: 'case_close', payload: { transcript: 'secret' }, idempotency_key: 'secret-key', last_error: 'raw error' }];
   const mockDb = {
-    getTicketWithAssignment: async id => ({ id, area_id: 2, assignment: null }),
+    getTicketWithAssignment: async id => ({ id, area_id: 2, assignment: { analyst_id: 10 } }),
     getAnalystByTokenId: async () => ({ id: 10, area_id: 2 }),
     listTicketSalesforceOutboxJobs: async (ticketId, filters) => { listArgs = { ticketId, filters }; return jobs; },
   };
@@ -393,7 +393,7 @@ test('Salesforce ticket outbox status returns jobs for authorized ticket without
 
 test('Salesforce ticket outbox status maps missing schema to controlled 503', async () => {
   const mockDb = {
-    getTicketWithAssignment: async id => ({ id, area_id: 2, assignment: null }),
+    getTicketWithAssignment: async id => ({ id, area_id: 2, assignment: { analyst_id: 10 } }),
     getAnalystByTokenId: async () => null,
     listTicketSalesforceOutboxJobs: async () => {
       const err = new Error('Salesforce outbox schema is not available.');
@@ -436,7 +436,7 @@ test('Salesforce route redacts upstream error text before returning or logging i
   t.after(() => { console.error = originalError; });
 
   const mockDb = {
-    getTicketWithAssignment: async id => ({ id, area_id: 2, assignment: null }),
+    getTicketWithAssignment: async id => ({ id, area_id: 2, assignment: { analyst_id: 10 } }),
     getAnalystByTokenId: async () => null,
   };
   const mockSf = {
@@ -570,7 +570,7 @@ test('Salesforce account lookup rejects unauthorized ticket_id before Salesforce
 test('Salesforce account lookup allows authorized ticket_id', async () => {
   let searchTerm;
   const mockDb = {
-    getTicketWithAssignment: async id => ({ id, area_id: 2, assignment: null }),
+    getTicketWithAssignment: async id => ({ id, area_id: 2, assignment: { analyst_id: 10 } }),
     getAnalystByTokenId: async () => ({ id: 10, area_id: 2 }),
   };
   const mockSf = {
@@ -623,7 +623,7 @@ test('Salesforce case assign rejects Case ID mismatch before Salesforce call', a
 test('Salesforce case read allows authorized admin with matching ticket', async () => {
   let sfCaseId;
   const mockDb = {
-    getTicketWithAssignment: async id => ({ id, area_id: 2, assignment: null, sf_case_id: '500xx' }),
+    getTicketWithAssignment: async id => ({ id, area_id: 2, assignment: { analyst_id: 10 }, sf_case_id: '500xx' }),
     getAnalystByTokenId: async () => null,
   };
   const mockSf = {
@@ -641,7 +641,7 @@ test('Salesforce case read allows authorized admin with matching ticket', async 
 test('Salesforce case update allows authorized admin and strips ticket_id from Salesforce payload', async () => {
   let updateArgs;
   const mockDb = {
-    getTicketWithAssignment: async id => ({ id, area_id: 2, assignment: null, sf_case_id: '500xx' }),
+    getTicketWithAssignment: async id => ({ id, area_id: 2, assignment: { analyst_id: 10 }, sf_case_id: '500xx' }),
     getAnalystByTokenId: async () => null,
   };
   const mockSf = {
@@ -659,7 +659,7 @@ test('Salesforce case update allows authorized admin and strips ticket_id from S
 test('Salesforce case assign allows authorized analyst with matching ticket', async () => {
   let sfCaseId;
   const mockDb = {
-    getTicketWithAssignment: async id => ({ id, area_id: 2, assignment: null, sf_case_id: '500xx' }),
+    getTicketWithAssignment: async id => ({ id, area_id: 2, assignment: { analyst_id: 10 }, sf_case_id: '500xx' }),
     getAnalystByTokenId: async () => ({ id: 10, area_id: 2 }),
   };
   const mockSf = {

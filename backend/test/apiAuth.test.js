@@ -8,6 +8,8 @@ function runMiddleware(middleware, req = {}) {
     const res = {
       statusCode: 200,
       body: null,
+      headers: {},
+      setHeader(name, value) { this.headers[name] = value; },
       status(code) {
         this.statusCode = code;
         return this;
@@ -29,7 +31,7 @@ test('apiAuth accepts Authorization Bearer header and attaches user', async () =
   let validatedToken;
   const auth = createApiAuth(async token => {
     validatedToken = token;
-    return { id: 1, role: 'admin' };
+    return { status: 'valid', user: { id: 1, role: 'admin' } };
   });
 
   const req = { headers: { authorization: 'Bearer valid-token' }, query: {} };
@@ -40,14 +42,14 @@ test('apiAuth accepts Authorization Bearer header and attaches user', async () =
   assert.deepEqual(result.req.user, { id: 1, role: 'admin' });
 });
 
-test('apiAuth rejects when token validator returns null', async () => {
-  const auth = createApiAuth(async () => null);
+test('apiAuth returns AUTH_REVOKED for a confirmed inactive token', async () => {
+  const auth = createApiAuth(async () => ({ status: 'invalid', code: 'AUTH_REVOKED' }));
 
   const result = await runMiddleware(auth, { headers: { authorization: 'Bearer revoked-token' }, query: {} });
 
   assert.equal(result.nextCalled, false);
   assert.equal(result.res.statusCode, 401);
-  assert.match(result.res.body.error, /inválido o revocado/);
+  assert.equal(result.res.body.code, 'AUTH_REVOKED');
 });
 
 test('apiAuth returns safe error when token validator throws', async () => {
@@ -56,8 +58,8 @@ test('apiAuth returns safe error when token validator throws', async () => {
   const result = await runMiddleware(auth, { headers: { authorization: 'Bearer valid-token' }, query: {} });
 
   assert.equal(result.nextCalled, false);
-  assert.equal(result.res.statusCode, 500);
-  assert.match(result.res.body.error, /base de datos de seguridad/);
+  assert.equal(result.res.statusCode, 503);
+  assert.equal(result.res.body.code, 'AUTH_UNAVAILABLE');
   assert.doesNotMatch(result.res.body.error, /secret/);
 });
 
@@ -73,6 +75,7 @@ test('apiAuth rejects query token alone without touching token validator', async
   assert.equal(result.nextCalled, false);
   assert.equal(result.res.statusCode, 401);
   assert.equal(validateCalls, 0);
+  assert.equal(result.res.body.code, 'AUTH_INVALID');
   assert.match(result.res.body.error, /Token ausente/);
 });
 
@@ -88,4 +91,21 @@ test('apiAuth rejects malformed non-Bearer Authorization without touching token 
   assert.equal(result.nextCalled, false);
   assert.equal(result.res.statusCode, 401);
   assert.equal(validateCalls, 0);
+});
+
+test('apiAuth accepts only safe correlation IDs and never forwards rejected values', async () => {
+  const seen = [];
+  const generated = 'server-generated-id';
+  const auth = createApiAuth(async (_token, context) => { seen.push(context.correlationId); return { status: 'valid', user: { id: 1 } }; }, { randomUUID: () => generated });
+  const rejected = ['token.like.a.jwt', 'line\nbreak', 'x'.repeat(65)];
+
+  for (const correlationId of rejected) {
+    const result = await runMiddleware(auth, { headers: { authorization: 'Bearer valid-token', 'x-correlation-id': correlationId } });
+    assert.equal(result.res.headers['x-correlation-id'], generated);
+  }
+  await runMiddleware(auth, { headers: { authorization: 'Bearer valid-token', 'x-correlation-id': 'safe_ID-123' } });
+  assert.deepEqual(seen, [generated, generated, generated, 'safe_ID-123']);
+  assert.equal(JSON.stringify(seen).includes('token.like.a.jwt'), false);
+  assert.equal(JSON.stringify(seen).includes('line\\nbreak'), false);
+  assert.equal(JSON.stringify(seen).includes('x'.repeat(65)), false);
 });

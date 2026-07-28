@@ -1,0 +1,7 @@
+-- Phase 11 has already been operator-applied in this environment. The canonical
+-- repairable contract now lives in phase11_conversation_sla_fix_forward.sql.
+-- Already-applied databases use phase11_composite_assignment_fix.sql for the
+-- definitive composite-return assignment repair.
+-- PostgreSQL canonicalizes the generated windows UNIQUE identifier to
+-- business_calendar_windows_calendar_id_weekday_starts_at_ends_at (63 bytes).
+-- Do not run this archival marker. Follow PHASE11_CONVERSATION_SLA_RUNBOOK.md.

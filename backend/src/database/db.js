@@ -6,6 +6,7 @@
 const { createClient } = require('@supabase/supabase-js');
 const crypto = require('crypto');
 const salesforceOutbox = require('../services/salesforceOutbox');
+const { createAuthValidator } = require('../services/authValidation');
 
 const supabaseUrl = process.env.SUPABASE_URL;
 // Server-side backend operations use admin/RLS-protected tables; prefer service_role.
@@ -24,7 +25,7 @@ const supabase = createClient(supabaseUrl, supabaseKey, {
   }
 });
 
-console.log('🌐 Conexión segura inicializada con Supabase URL:', supabaseUrl);
+console.log('🌐 Conexión segura inicializada con Supabase.');
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -32,9 +33,107 @@ function hashToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
 
+const CHAT_ID_PATTERN = /^[1-9][0-9]{5,31}@(c\.us|lid)$/;
+
+function requireExactChatId(chatId) {
+  if (typeof chatId !== 'string' || chatId.length > 64 || !CHAT_ID_PATTERN.test(chatId)) {
+    const error = new Error('A valid exact WhatsApp chat ID is required.');
+    error.code = 'INVALID_CHAT_ID';
+    throw error;
+  }
+  return chatId;
+}
+
+async function getCandidateClassification(chatId) {
+  const exactChatId = requireExactChatId(chatId);
+  const { data, error } = await supabase.from('contact_classifications').select('*').eq('chat_id', exactChatId).maybeSingle();
+  if (error) throw error;
+  return data || null;
+}
+
+async function markCandidate(chatId, { source = 'auto', markedBy = 'whatsapp-bot', note = null } = {}) {
+  const exactChatId = requireExactChatId(chatId);
+  const payload = {
+    chat_id: exactChatId, classification: 'candidate', support_blocked: true,
+    source: source === 'manual' ? 'manual' : 'auto', marked_at: new Date().toISOString(),
+    marked_by: String(markedBy || 'whatsapp-bot').slice(0, 120),
+    note: note === null ? null : String(note).slice(0, 500),
+  };
+  const { data, error } = await supabase.from('contact_classifications').upsert(payload, { onConflict: 'chat_id' }).select().single();
+  if (error) throw error;
+  return data;
+}
+
+async function unmarkCandidate(chatId) {
+  const exactChatId = requireExactChatId(chatId);
+  const { error } = await supabase.from('contact_classifications').delete().eq('chat_id', exactChatId);
+  if (error) throw error;
+  return true;
+}
+
+async function claimCandidateGuidance(chatId) {
+  const exactChatId = requireExactChatId(chatId);
+  const token = crypto.randomUUID();
+  const { data, error } = await supabase.rpc('claim_candidate_guidance', { p_chat_id: exactChatId, p_token: token });
+  if (error) throw error;
+  return data === true || (Array.isArray(data) && data[0] === true) ? token : null;
+}
+
+async function finalizeCandidateGuidance(chatId, token) {
+  const exactChatId = requireExactChatId(chatId);
+  const { data, error } = await supabase.rpc('finalize_candidate_guidance', { p_chat_id: exactChatId, p_token: token });
+  if (error) throw error;
+  return data === true || (Array.isArray(data) && data[0] === true);
+}
+
+async function releaseCandidateGuidance(chatId, token) {
+  const exactChatId = requireExactChatId(chatId);
+  const { data, error } = await supabase.rpc('release_candidate_guidance', { p_chat_id: exactChatId, p_token: token });
+  if (error) throw error;
+  return data === true || (Array.isArray(data) && data[0] === true);
+}
+
+async function getCandidateSupportSettings() {
+  const { data, error } = await supabase.from('app_settings').select('key,value').in('key', ['candidate_form_url', 'candidate_guidance_message']);
+  if (error) throw error;
+  const settings = Object.fromEntries((data || []).map(row => [row.key, row.value]));
+  return { formUrl: settings.candidate_form_url || '', message: settings.candidate_guidance_message || '' };
+}
+
+async function updateCandidateSupportSettings({ formUrl, message }) {
+  const rows = [
+    { key: 'candidate_form_url', value: formUrl },
+    { key: 'candidate_guidance_message', value: message },
+  ];
+  const { error } = await supabase.from('app_settings').upsert(rows, { onConflict: 'key' });
+  if (error) throw error;
+  return { formUrl, message };
+}
+
+async function listCandidateClassifications() {
+  const { data, error } = await supabase
+    .from('contact_classifications')
+    .select('classification,support_blocked,source,marked_at,marked_by,note,chat_id')
+    .eq('classification', 'candidate')
+    .order('marked_at', { ascending: false });
+  if (error) throw error;
+  return data || [];
+}
+
 // ── Ticket Operations ──────────────────────────────────────────────────────
 
-async function createTicket({ chat_id, telefono, nombre_analista, nombre_empresa, correo, situacion, prioridad, area_id }) {
+async function getTicketBySubmissionId(submissionId) {
+  const { data, error } = await supabase
+    .from('tickets')
+    .select('*')
+    .eq('bot_submission_id', submissionId)
+    .maybeSingle();
+
+  if (error) throw error;
+  return data || null;
+}
+
+async function createTicket({ chat_id, telefono, nombre_analista, nombre_empresa, correo, situacion, categoria, prioridad, area_id, submission_id }) {
   const payload = {
     chat_id,
     telefono: telefono || null,
@@ -42,8 +141,10 @@ async function createTicket({ chat_id, telefono, nombre_analista, nombre_empresa
     nombre_empresa: nombre_empresa || null,
     correo: correo || null,
     situacion: situacion || null,
+    categoria: categoria || null,
     prioridad: prioridad || null,
-    status: 'open'
+    status: 'open',
+    bot_submission_id: submission_id || null
   };
 
   if (area_id) payload.area_id = area_id;
@@ -55,9 +156,38 @@ async function createTicket({ chat_id, telefono, nombre_analista, nombre_empresa
     .single();
 
   if (error) {
+    if (submission_id && isUniqueViolation(error)) {
+      const existing = await getTicketBySubmissionId(submission_id);
+      if (existing) return { ...existing, created: false };
+    }
     console.error('❌ Error Supabase al crear ticket:', error.message);
     throw error;
   }
+  return { ...data, created: true };
+}
+
+async function createRoutedTicket({ chat_id, telefono, nombre_analista, nombre_empresa, correo, situacion, categoria, category_key, prioridad, submission_id }) {
+  const { data, error } = await supabase.rpc('create_routed_ticket', {
+    p_chat_id: chat_id,
+    p_telefono: telefono || null,
+    p_nombre_analista: nombre_analista || null,
+    p_nombre_empresa: nombre_empresa || null,
+    p_correo: correo || null,
+    p_situacion: situacion || null,
+    p_categoria: categoria,
+    p_category_key: category_key,
+    p_prioridad: prioridad || null,
+    p_submission_id: submission_id || null,
+  });
+  if (error) throw error;
+  const ticket = Array.isArray(data) ? data[0] : data;
+  if (!ticket?.id) throw Object.assign(new Error('Category routing is unavailable.'), { code: 'CATEGORY_ROUTING_UNAVAILABLE' });
+  return ticket;
+}
+
+async function updateTicketPriority(id, prioridad) {
+  const { data, error } = await supabase.from('tickets').update({ prioridad }).eq('id', id).select().single();
+  if (error) throw error;
   return data;
 }
 
@@ -161,7 +291,7 @@ async function getTicketWithAssignment(id) {
 async function getTicketWithRouting(id) {
   const { data, error } = await supabase
     .from('tickets')
-    .select('*, area:areas(*), ticket_assignments(*, analyst:analysts(*))')
+    .select('*, area:areas(*), ticket_assignments(*, analyst:analysts(*)), sla_snapshots(*, sla_clock_segments(*))')
     .eq('id', id)
     .single();
 
@@ -179,7 +309,7 @@ async function getTicketWithRouting(id) {
 async function getTicketsWithRouting() {
   const { data, error } = await supabase
     .from('tickets')
-    .select('*, area:areas(*), ticket_assignments(*, analyst:analysts(*))')
+    .select('*, area:areas(*), ticket_assignments(*, analyst:analysts(*)), sla_snapshots(*, sla_clock_segments(*))')
     .order('created_at', { ascending: false });
 
   if (error) {
@@ -358,11 +488,13 @@ async function getSession(chatId) {
   if (error || !data) return null;
   return {
     paso: data.paso,
+    categoria: data.categoria,
     nombre: data.nombre,
     empresa: data.empresa,
     correo: data.correo,
     situacion: data.situacion,
     ticketId: data.ticket_id,
+    submissionId: data.submission_id || undefined,
     flowVersionId: data.flow_version_id || undefined
   };
 }
@@ -371,11 +503,13 @@ async function saveSession(chatId, session) {
   const payload = {
     chat_id: chatId,
     paso: session.paso ?? null,
+    categoria: session.categoria ?? null,
     nombre: session.nombre ?? null,
     empresa: session.empresa ?? null,
     correo: session.correo ?? null,
     situacion: session.situacion ?? null,
     ticket_id: session.ticketId ?? null,
+    submission_id: session.submissionId ?? null,
     flow_version_id: session.flowVersionId ?? null,
     updated_at: new Date().toISOString()
   };
@@ -400,7 +534,68 @@ async function deleteSession(chatId) {
     .delete()
     .eq('chat_id', chatId);
 
-  if (error) console.error('❌ Error Supabase al eliminar sesión:', error.message);
+  if (error) {
+    console.error('❌ Error Supabase al eliminar sesión:', error.message);
+    throw error;
+  }
+}
+
+async function ensureTicketPostProcessing(ticketId) {
+  const { data, error } = await supabase.rpc('ensure_ticket_post_processing', { p_ticket_id: ticketId });
+  if (error) throw error;
+  return Array.isArray(data) ? data[0] : data;
+}
+
+async function claimTicketPostProcessing(workerId) {
+  const { data, error } = await supabase.rpc('claim_ticket_post_processing', {
+    p_worker_id: workerId,
+  });
+  if (error) throw error;
+  return data || [];
+}
+
+async function finalizeTicketPostProcessingEffect(ticketId, workerId, effect, completed, errorCode = null) {
+  const { data, error } = await supabase.rpc('finalize_ticket_post_processing_effect', {
+    p_ticket_id: ticketId, p_worker_id: workerId, p_effect: effect,
+    p_completed: completed, p_error_code: errorCode,
+  });
+  if (error) throw error;
+  return data === true || (Array.isArray(data) && data[0] === true);
+}
+
+async function markTicketPostProcessingAttemptStarted(ticketId, workerId, effect) {
+  const { data, error } = await supabase.rpc('mark_ticket_post_processing_attempt_started', {
+    p_ticket_id: ticketId, p_worker_id: workerId, p_effect: effect,
+  });
+  if (error) throw error;
+  return data === true || (Array.isArray(data) && data[0] === true);
+}
+
+async function claimTicketWhatsAppAck(ticketId, claimToken) {
+  const { data, error } = await supabase.rpc('claim_ticket_whatsapp_ack', {
+    p_ticket_id: ticketId, p_claim_token: claimToken,
+  });
+  if (error) throw error;
+  return data === true || (Array.isArray(data) && data[0] === true);
+}
+
+async function finalizeTicketWhatsAppAck(ticketId, claimToken) {
+  const { data, error } = await supabase.rpc('finalize_ticket_whatsapp_ack', {
+    p_ticket_id: ticketId, p_claim_token: claimToken,
+  });
+  if (error) throw error;
+  return data === true || (Array.isArray(data) && data[0] === true);
+}
+
+async function listTicketPostProcessing({ limit = 50, status } = {}) {
+  const safeLimit = Math.min(Math.max(Number(limit) || 50, 1), 200);
+  let query = supabase.from('ticket_post_processing')
+    .select('ticket_id,submission_id,salesforce_outbox_status,operational_emit_status,session_cleanup_status,whatsapp_ack_status,whatsapp_ack_attempts,attempts,last_error_code,updated_at')
+    .order('updated_at', { ascending: false }).limit(safeLimit);
+  if (status === 'incomplete') query = query.or('salesforce_outbox_status.neq.completed,operational_emit_status.neq.completed,session_cleanup_status.neq.completed,whatsapp_ack_status.neq.completed');
+  const { data, error } = await query;
+  if (error) throw error;
+  return data || [];
 }
 
 async function loadAllSessions() {
@@ -409,8 +604,9 @@ async function loadAllSessions() {
     .select('*');
 
   if (error) {
-    console.error('❌ Error Supabase al cargar sesiones:', error.message);
-    return [];
+    const hydrationError = new Error('Unable to load persisted bot sessions.', { cause: error });
+    hydrationError.code = 'SESSION_HYDRATION_FAILED';
+    throw hydrationError;
   }
   return data || [];
 }
@@ -476,18 +672,130 @@ async function createToken({ name, role = 'agent' }) {
   return { rawToken, name, role };
 }
 
-async function validateToken(token) {
-  if (!token) return null;
+const AGENT_TOKEN_METADATA = 'id, name, role, active, created_at';
+
+async function createPendingAgentToken(name) {
+  const rawToken = 'nexo_tkn_' + crypto.randomBytes(16).toString('hex');
+  const { data, error } = await supabase
+    .from('dashboard_tokens')
+    .insert({ token_hash: hashToken(rawToken), name, role: 'agent', active: false })
+    .select(AGENT_TOKEN_METADATA)
+    .single();
+  if (error) throw error;
+  return { rawToken, token: data };
+}
+
+async function activatePendingAgentToken(id) {
+  const { data, error } = await supabase
+    .from('dashboard_tokens')
+    .update({ active: true })
+    .eq('id', id)
+    .eq('role', 'agent')
+    .eq('active', false)
+    .select(AGENT_TOKEN_METADATA)
+    .maybeSingle();
+  if (error) throw error;
+  return data || null;
+}
+
+async function listAgentTokens() {
+  const { data, error } = await supabase
+    .from('dashboard_tokens')
+    .select(AGENT_TOKEN_METADATA)
+    .eq('role', 'agent')
+    .order('created_at', { ascending: false });
+  if (error) throw error;
+  return data || [];
+}
+
+async function getAgentToken(id) {
+  const { data, error } = await supabase
+    .from('dashboard_tokens')
+    .select(AGENT_TOKEN_METADATA)
+    .eq('id', id)
+    .eq('role', 'agent')
+    .maybeSingle();
+  if (error) throw error;
+  return data || null;
+}
+
+async function getActiveAgentToken(id) {
+  const { data, error } = await supabase
+    .from('dashboard_tokens')
+    .select(AGENT_TOKEN_METADATA)
+    .eq('id', id)
+    .eq('role', 'agent')
+    .eq('active', true)
+    .maybeSingle();
+  if (error) throw error;
+  return data || null;
+}
+
+async function revokePendingAgentToken(id) {
+  const { data, error } = await supabase
+    .from('dashboard_tokens')
+    .update({ active: false })
+    .eq('id', id)
+    .eq('role', 'agent')
+    .eq('active', true)
+    .select(AGENT_TOKEN_METADATA)
+    .maybeSingle();
+  if (error) throw error;
+  if (data) return { outcome: 'revoked', token: data };
+  const token = await getAgentToken(id);
+  return token ? { outcome: 'already_revoked', token } : null;
+}
+
+function tokenRevocationUnavailable() {
+  return Object.assign(new Error('Token revocation is temporarily unavailable.'), {
+    code: 'TOKEN_REVOCATION_UNAVAILABLE', statusCode: 503,
+  });
+}
+
+async function revokeAgentTokenAtomically(tokenId, actorTokenId, requestId) {
+  let response;
+  try {
+    response = await supabase.rpc('revoke_agent_token_with_audit', {
+      p_token_id: tokenId,
+      p_actor_token_id: actorTokenId,
+      p_request_id: requestId,
+    });
+  } catch (_error) {
+    throw tokenRevocationUnavailable();
+  }
+  if (response?.error) throw tokenRevocationUnavailable();
+  const result = response?.data;
+  if (!result || typeof result !== 'object' || !['revoked', 'already_revoked', 'not_found', 'wrong_role'].includes(result.outcome)) {
+    throw tokenRevocationUnavailable();
+  }
+  if (result.outcome === 'revoked' || result.outcome === 'already_revoked') {
+    const token = result.token;
+    if (!token || token.id !== tokenId || token.role !== 'agent' || token.active !== false || typeof token.name !== 'string') {
+      throw tokenRevocationUnavailable();
+    }
+    return { outcome: result.outcome, token };
+  }
+  if (Object.hasOwn(result, 'token')) throw tokenRevocationUnavailable();
+  return { outcome: result.outcome };
+}
+
+async function validateTokenOnce(token, { signal } = {}) {
   const tokenHash = hashToken(token);
   const { data, error } = await supabase
     .from('dashboard_tokens')
     .select('id, name, role, active')
     .eq('token_hash', tokenHash)
-    .single();
+    .abortSignal(signal)
+    .maybeSingle();
 
-  if (error || !data || !data.active) return null;
-  return { id: data.id, name: data.name, role: data.role };
+  if (error) throw error;
+  if (!data) return { status: 'invalid', code: 'AUTH_INVALID' };
+  if (!data.active) return { status: 'invalid', code: 'AUTH_REVOKED' };
+  return { status: 'valid', user: { id: data.id, name: data.name, role: data.role } };
 }
+
+const authValidator = createAuthValidator(validateTokenOnce);
+const validateToken = authValidator.validate;
 
 async function getTokens() {
   const { data, error } = await supabase
@@ -527,6 +835,137 @@ async function listAreas({ includeInactive = true } = {}) {
     throw error;
   }
   return data || [];
+}
+
+async function listCategoryAreaMappings() {
+  const { data, error } = await supabase.from('category_area_mappings').select('category_key,area_id,active,created_at,updated_at,area:areas(id,name,active)').order('category_key');
+  if (error) throw error;
+  return data || [];
+}
+
+async function updateCategoryAreaMapping(categoryKey, { area_id, active }) {
+  const payload = { category_key: categoryKey };
+  if (area_id !== undefined) payload.area_id = area_id;
+  if (active !== undefined) payload.active = !!active;
+  const { data, error } = await supabase.from('category_area_mappings').upsert(payload, { onConflict: 'category_key' }).select('category_key,area_id,active,created_at,updated_at,area:areas(id,name,active)').single();
+  if (error) throw error;
+  return data;
+}
+
+async function claimTicket(ticketId, analystId) {
+  const { data, error } = await supabase.rpc('claim_area_ticket', { p_ticket_id: ticketId, p_analyst_id: analystId });
+  if (error) throw error;
+  if (!data) throw Object.assign(new Error('Ticket is no longer available to claim.'), { statusCode: 409 });
+  return getTicketWithRouting(ticketId);
+}
+
+async function claimConversation({ ticketId, analystId, analystAreaId, expectedRevision, idempotencyKey, actorName }) {
+  const { data, error } = await supabase.rpc('claim_conversation', {
+    p_command: { version: 1, ticket_id: Number(ticketId), expected_revision: expectedRevision, idempotency_key: idempotencyKey },
+    p_actor_id: String(analystId), p_actor_name: actorName, p_actor_role: 'analyst', p_actor_area_id: analystAreaId,
+  });
+  if (error) throw mapWorkflowError(error);
+  return verifiedWorkflowResult(data, ticketId);
+}
+
+async function adminRouteTicket({ action, ticketId, areaId = null, analystId = null, actorName = 'admin', metadata = {} }) {
+  const { data, error } = await supabase.rpc('admin_route_ticket', {
+    p_action: action, p_ticket_id: ticketId, p_area_id: areaId, p_analyst_id: analystId,
+    p_actor_name: actorName, p_metadata: metadata,
+  });
+  if (error) throw error;
+  const rpcResult = Array.isArray(data) ? data[0] : data;
+  const ticket = await getTicketWithRouting(ticketId);
+  return ticket ? { ...ticket, previous_area_id: rpcResult?.previous_area_id ?? null } : ticket;
+}
+
+async function switchAnalystArea({ analystId, areaId, actorName = 'admin', metadata = {} }) {
+  const { data, error } = await supabase.rpc('switch_analyst_area', {
+    p_analyst_id: analystId, p_area_id: areaId, p_actor_name: actorName, p_metadata: metadata,
+  });
+  if (error) throw error;
+  return data;
+}
+
+async function transitionConversation({ ticketId, state, waitingReason, expectedRevision, idempotencyKey, actor }) {
+  const { data, error } = await supabase.rpc('transition_conversation', {
+    p_command: { version: 1, ticket_id: Number(ticketId), state, waiting_reason: waitingReason, expected_revision: expectedRevision, idempotency_key: idempotencyKey },
+    p_actor_id: String(actor.actorId), p_actor_name: actor.actorName,
+    p_actor_role: actor.actorRole, p_actor_area_id: actor.actorAreaId,
+  });
+  if (error) throw mapWorkflowError(error);
+  return verifiedWorkflowResult(data, ticketId);
+}
+
+async function updateDevelopmentEscalation({ ticketId, status, note, expectedRevision, idempotencyKey, actor }) {
+  const { data, error } = await supabase.rpc('update_development_escalation', {
+    p_command: { version: 1, ticket_id: Number(ticketId), status, note, expected_revision: expectedRevision, idempotency_key: idempotencyKey },
+    p_actor_id: String(actor.actorId), p_actor_name: actor.actorName,
+    p_actor_role: actor.actorRole, p_actor_area_id: actor.actorAreaId,
+  });
+  if (error) throw mapWorkflowError(error);
+  return verifiedWorkflowResult(data, ticketId);
+}
+
+async function verifiedWorkflowResult(data, requestedTicketId) {
+  const result = Array.isArray(data) ? data[0] : data;
+  if (!result?.ticket_id || String(result.ticket_id) !== String(requestedTicketId) || !result?.event_id) {
+    throw Object.assign(new Error('WORKFLOW_RESULT_MISMATCH'), { statusCode: 409 });
+  }
+  const workflow = await getTicketWorkflow(result.ticket_id);
+  return { workflow, mutation: { replayed: result.replayed === true, eventId: result.event_id, eventType: result.event_type } };
+}
+
+function mapWorkflowError(error) {
+  const conflict = /REVISION_CONFLICT|ILLEGAL_|ACTIVE_ESCALATION|IDEMPOTENCY_KEY_REUSED|WORKFLOW_RESULT_MISMATCH/.test(error?.message || '');
+  const forbidden = /FORBIDDEN/.test(error?.message || '') || error?.code === '42501';
+  const unavailable = /^08/.test(error?.code || '') || /database unavailable/i.test(error?.message || '');
+  error.statusCode = unavailable ? 503 : forbidden ? 403 : conflict ? 409 : error?.code === 'P0002' ? 404 : 400;
+  return error;
+}
+
+async function getTicketWorkflow(ticketId) {
+  const ticket = await getTicketWithRouting(ticketId);
+  if (!ticket) return null;
+  const [{ data: escalations, error: escalationError }, { data: snapshots, error: snapshotError }] = await Promise.all([
+    supabase.from('development_escalations').select('*').eq('ticket_id', ticketId).order('id', { ascending: false }),
+    supabase.from('sla_snapshots').select('*,sla_clock_segments(*)').eq('ticket_id', ticketId).order('id'),
+  ]);
+  if (escalationError) throw escalationError;
+  if (snapshotError) throw snapshotError;
+  return { ...ticket, development_escalations: escalations || [], sla_snapshots: snapshots || [] };
+}
+
+async function configureSlaPolicy(payload) {
+  const { data, error } = await supabase.rpc('configure_sla_policy', {
+    p_area_id: payload.areaId, p_priority: payload.priority, p_clock_type: payload.clockType,
+    p_clock_mode: payload.clockMode, p_calendar_id: payload.calendarId,
+    p_target_minutes: payload.targetMinutes, p_warning_minutes: payload.warningMinutes,
+    p_actor_name: payload.actorName,
+  });
+  if (error) throw error;
+  return data;
+}
+
+async function listSlaPolicies() {
+  const { data, error } = await supabase.from('sla_policies').select('*').order('area_id').order('priority').order('clock_type').order('version', { ascending: false });
+  if (error) throw error;
+  return data || [];
+}
+
+async function listBusinessCalendars() {
+  const { data, error } = await supabase.from('business_calendars').select('*,business_calendar_windows(*),business_calendar_exceptions(*)').order('id');
+  if (error) throw error;
+  return data || [];
+}
+
+async function configureBusinessCalendar(payload) {
+  const { data, error } = await supabase.rpc('configure_business_calendar', {
+    p_area_id: payload.areaId, p_name: payload.name, p_timezone: payload.timezone,
+    p_windows: payload.windows, p_exceptions: payload.exceptions, p_actor_name: payload.actorName,
+  });
+  if (error) throw error;
+  return data;
 }
 
 async function getAreaById(id) {
@@ -869,6 +1308,23 @@ async function updateBotFlowStep(id, changes) {
   return data;
 }
 
+async function getBotFlowStudioLayout({ versionId, areaId = null }) {
+  let query = supabase.from('bot_flow_studio_layouts').select('*').eq('version_id', Number(versionId));
+  query = areaId === null ? query.is('area_id', null) : query.eq('area_id', Number(areaId));
+  const { data, error } = await query.maybeSingle();
+  if (error) throw error;
+  return data || null;
+}
+
+async function putBotFlowStudioLayout({ versionId, areaId = null, layout, expectedRevision, updatedBy }) {
+  const { data, error } = await supabase.rpc('put_bot_flow_studio_layout', {
+    p_version_id: Number(versionId), p_area_id: areaId, p_layout: layout,
+    p_expected_revision: expectedRevision, p_updated_by: updatedBy,
+  });
+  if (error) throw error;
+  return Array.isArray(data) ? (data[0] || null) : (data || null);
+}
+
 function handleSalesforceOutboxError(error, context) {
   if (salesforceOutbox.isSchemaMissingError(error)) {
     throw salesforceOutbox.toSchemaMissingError(error);
@@ -1036,6 +1492,9 @@ module.exports = {
   closeDb,
   // Tickets
   createTicket,
+  createRoutedTicket,
+  getTicketBySubmissionId,
+  updateTicketPriority,
   updateTicketSalesforce,
   closeTicket,
   getTickets,
@@ -1060,6 +1519,23 @@ module.exports = {
   saveSession,
   deleteSession,
   loadAllSessions,
+  ensureTicketPostProcessing,
+  claimTicketPostProcessing,
+  finalizeTicketPostProcessingEffect,
+  markTicketPostProcessingAttemptStarted,
+  claimTicketWhatsAppAck,
+  finalizeTicketWhatsAppAck,
+  listTicketPostProcessing,
+  // Candidate support blocking
+  getCandidateClassification,
+  markCandidate,
+  unmarkCandidate,
+  claimCandidateGuidance,
+  finalizeCandidateGuidance,
+  releaseCandidateGuidance,
+  getCandidateSupportSettings,
+  updateCandidateSupportSettings,
+  listCandidateClassifications,
   // Stats
   getStats,
   // Cleanup
@@ -1067,11 +1543,31 @@ module.exports = {
   cleanupOldSessions,
   // Dashboard Tokens
   createToken,
+  createPendingAgentToken,
+  activatePendingAgentToken,
+  listAgentTokens,
+  getAgentToken,
+  getActiveAgentToken,
+  revokePendingAgentToken,
+  revokeAgentTokenAtomically,
   validateToken,
   getTokens,
   revokeToken,
   // Admin
   listAreas,
+  listCategoryAreaMappings,
+  updateCategoryAreaMapping,
+  claimTicket,
+  claimConversation,
+  adminRouteTicket,
+  switchAnalystArea,
+  transitionConversation,
+  updateDevelopmentEscalation,
+  getTicketWorkflow,
+  configureSlaPolicy,
+  listSlaPolicies,
+  listBusinessCalendars,
+  configureBusinessCalendar,
   getAreaById,
   createArea,
   updateArea,
@@ -1088,6 +1584,8 @@ module.exports = {
   listBotFlows,
   createBotFlowStep,
   updateBotFlowStep,
+  getBotFlowStudioLayout,
+  putBotFlowStudioLayout,
   // Salesforce Outbox
   createSalesforceOutboxJob,
   getSalesforceOutboxJobByIdempotencyKey,

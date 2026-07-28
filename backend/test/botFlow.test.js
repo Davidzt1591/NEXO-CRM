@@ -24,8 +24,8 @@ test('bot flow service returns static Spanish fallback when DB is empty', async 
   const message = await service.getBotMessage('ask_company', { nombre: 'Ana' });
 
   assert.equal(message.source, 'fallback');
-  assert.equal(message.versionId, 1);
-  assert.equal(message.text, 'Gracias, Ana. Indíqueme el nombre de la *Empresa o Cliente* afectado:');
+  assert.equal(message.versionId, 2);
+  assert.equal(message.text, 'Gracias, Ana. ¿Cuál es el nombre de tu empresa?');
 });
 
 test('bot flow service caches DB templates until TTL expires', async () => {
@@ -89,7 +89,7 @@ test('bot flow service falls back when DB lookup fails', async () => {
   const message = await service.getBotMessage('processing');
 
   assert.equal(message.source, 'fallback');
-  assert.equal(message.text, '📋 *Procesando solicitud técnica en Magneto365...*');
+  assert.equal(message.text, 'Estamos creando tu ticket. Un momento, por favor.');
 });
 
 test('area flow uses global DB template version when global row supplies effective message', async () => {

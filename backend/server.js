@@ -1,3 +1,9 @@
+const path = require('node:path');
+const { enforceStartupDependencyTopology } = require('../scripts/dependency-topology');
+enforceStartupDependencyTopology({
+  repositoryRoot: path.resolve(__dirname, '..'),
+  runtimeDirectories: [path.resolve(__dirname, '..'), __dirname],
+});
 require('dotenv').config();
 // For corporate/self-signed certificate chains, configure NODE_EXTRA_CA_CERTS
 // with a local CA bundle instead of disabling TLS verification globally.
@@ -23,41 +29,59 @@ console.error = (...args) => { const safeArgs = redactLogArgs(args); addLog('ERR
 console.warn = (...args) => { const safeArgs = redactLogArgs(args); addLog('WARN', safeArgs); origWarn(...safeArgs); };
 const { initWhatsApp: setupWhatsApp } = require('./src/services/whatsapp');
 const { setupSockets } = require('./src/socket');
+const { loadSessionsFromDb } = require('./src/services/whatsapp/wwebjs');
+const { createHealthHandler, createStartupState, hydrateThenStart, retryConfig } = require('./src/startup');
+
+function captureConfiguredStartupError(error, context) {
+  if (!process.env.SENTRY_DSN) return;
+  try {
+    // Sentry is optional in this deployment; use it when the configured SDK is present.
+    require('@sentry/node').captureException(error, context);
+  } catch (_) {
+    console.warn('startup_observability_unavailable', { causeCode: 'SENTRY_SDK_UNAVAILABLE' });
+  }
+}
 
 const helmet = require('helmet');
 const cors = require('cors');
-const rateLimit = require('express-rate-limit');
+const { createPostAuthLimiters, createPreAuthApiLimiter, createSessionLimiter, rateLimitConfig, trustProxySetting } = require('./src/middleware/rateLimits');
+const { corsOriginHandler } = require('./src/security/origins');
+const { validateSecurityConfig } = require('./src/security/securityConfig');
+const { createCsrfProtection } = require('./src/middleware/csrf');
 
 const app = express();
-app.set('trust proxy', 1); // Trust first proxy (Nginx) for client IP detection
+// Direct/local traffic is the safe default. TRUST_PROXY_CIDRS accepts only an
+// explicit proxy-addr CIDR/loopback list; numeric hop trust is rejected.
+app.set('trust proxy', trustProxySetting());
 
 app.use(helmet());
-app.use(cors({
-  origin: ['http://localhost:5173', 'http://localhost:5174'],
-}));
-
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100,
-  message: { error: 'Demasiadas peticiones desde esta IP, por favor intenta más tarde.' }
+const securityConfig = validateSecurityConfig();
+const allowedOrigins = securityConfig.allowedOrigins;
+app.use(cors({ origin: corsOriginHandler(allowedOrigins), credentials: true }));
+app.use((error, _req, res, next) => {
+  if (error?.code === 'ORIGIN_NOT_ALLOWED') return res.status(403).json({ error: 'Origin not allowed.' });
+  return next(error);
 });
 
 app.use(express.json());
-app.use('/', limiter);
 
-// Public Endpoints
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', uptime: process.uptime() });
-});
+const startupState = createStartupState();
+// Liveness is exposed while booting; readiness remains 503 until hydration succeeds.
+app.get('/health', createHealthHandler(startupState));
 
 const apiAuth = require('./src/middleware/apiAuth');
 const adminOnly = require('./src/middleware/adminOnly');
 
 // Enforce auth on all API sub-routes
-app.use('/api', apiAuth);
+const rateLimits = rateLimitConfig();
+const strictRouteLimiter = createSessionLimiter(rateLimits);
+app.use('/api/session', strictRouteLimiter, require('./src/routes/session').createSessionRouter(undefined, { allowedOrigins }));
+app.use('/api', createPreAuthApiLimiter(rateLimits), apiAuth, createCsrfProtection(allowedOrigins), createPostAuthLimiters(rateLimits));
 
 // Protected API Routes
 app.use('/api/sf', require('./src/routes/salesforce'));
+app.use('/api/candidates', require('./src/routes/candidates'));
+app.use('/api/conversations', require('./src/routes/conversations'));
 app.use('/api/admin', adminOnly, require('./src/routes/admin'));
 
 app.get('/api/logs', adminOnly, (req, res) => {
@@ -67,9 +91,8 @@ app.get('/api/logs', adminOnly, (req, res) => {
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: process.env.FRONTEND_URL
-      ? [process.env.FRONTEND_URL]
-      : ['http://localhost:5173', 'http://localhost:5174'],
+    origin: [...allowedOrigins],
+    credentials: true,
     methods: ['GET', 'POST'],
   },
 });
@@ -88,15 +111,21 @@ const { startCleanupCron } = require('./src/database/cleanup');
   // 2. Start nightly cleanup cron
   startCleanupCron();
 
-  // 3. Inicializamos WhatsApp pasándole los Sockets
-  const { client, borrarSesion } = setupWhatsApp(io);
-
-  // 4. Inicializamos Sockets pasándole el cliente WhatsApp
-  setupSockets(io, client, borrarSesion);
-
-  // 5. Start server
-  server.listen(PORT, () => {
+  // 3. Expose degraded health while persisted sessions are hydrated.
+  server.listen(PORT, securityConfig.host, () => {
     console.log(`\n🚀 NEXO Backend corriendo en puerto ${PORT}`);
-    client.initialize();
+  });
+
+  // 4. WhatsApp processing starts only after durable session hydration succeeds.
+  await hydrateThenStart({
+    hydrate: loadSessionsFromDb,
+    state: startupState,
+    config: retryConfig(),
+    captureException: captureConfiguredStartupError,
+    startWhatsApp: async () => {
+      const { client, borrarSesion } = setupWhatsApp(io, { captureException: captureConfiguredStartupError });
+      setupSockets(io, client, borrarSesion);
+      await client.initialize();
+    },
   });
 })();

@@ -1,11 +1,12 @@
 const store = require('./store');
 const db    = require('./database/db');
 const whatsappAdapter = require('./services/whatsapp');
-const { canAccessTicket, filterTicketsForPrincipal, isAdmin, emitOperational } = require('./realtime/operational');
+const { canAccessTicket, analystCanSeeQueueCard, filterTicketsForPrincipal, isAdmin, emitClassified, emitTicketOperation, emitMinimalAreaOperation, toMinimalQueueCard } = require('./realtime/operational');
 const routing = require('./services/routing');
 const { validateWhatsAppMedia } = require('./services/mediaValidation');
 const { uploadWhatsAppMediaForTicket } = require('./services/salesforceMedia');
 const ticketClose = require('./services/ticketClose');
+const { clearProtectedSocketState, createPassiveSocketRevalidator, createSocketAuthMiddleware, createSocketEventAuthMiddleware } = require('./middleware/socketAuth');
 
 async function resolveTicketArea(ticketId) {
   if (!ticketId) return null;
@@ -13,20 +14,46 @@ async function resolveTicketArea(ticketId) {
   return ticket?.area_id || null;
 }
 
-async function resolveChatArea(chatId) {
+async function resolveChatTicket(chatId) {
   const ticketId = store.sesiones[chatId]?.ticketId;
-  return resolveTicketArea(ticketId);
+  return ticketId ? db.getTicketWithAssignment(ticketId) : null;
 }
 
-function emitAdminOperation(io, event, payload, areaId) {
-  let target = io.to('admin');
-  if (areaId) target = target.to(`area:${areaId}`);
-  target.emit(event, payload);
+function emitAdminOperation(io, event, payload) {
+  io.to('admin').emit(event, payload);
+}
+
+async function disconnectSocketsForToken(io, tokenId) {
+  let disconnected = 0;
+  let failed = false;
+  for (const socket of io?.sockets?.sockets?.values?.() || []) {
+    if (String(socket.user?.id ?? '') !== String(tokenId)) continue;
+    try {
+      socket.emit('auth-error', { code: 'AUTH_REVOKED' });
+    } catch (_error) {
+      failed = true;
+    }
+    try {
+      clearProtectedSocketState(socket);
+      socket.disconnect(true);
+      disconnected += 1;
+    } catch (_error) {
+      failed = true;
+    }
+  }
+  if (failed) throw Object.assign(new Error('One or more local sockets could not be disconnected.'), { code: 'SOCKET_TEARDOWN_FAILED', disconnectedSockets: disconnected });
+  return disconnected;
 }
 
 async function emitAdminChatOperation(io, event, payload, chatId) {
   try {
-    emitAdminOperation(io, event, payload, await resolveChatArea(chatId));
+    const ticket = await resolveChatTicket(chatId);
+    emitClassified(io, {
+      event,
+      adminPayload: payload,
+      analystId: ticket?.assignment?.analyst_id || null,
+      analystPayload: ticket?.assignment?.analyst_id ? payload : null,
+    });
   } catch (err) {
     console.warn(`⚠️  No se pudo resolver área para ${event}:`, err.message);
     emitAdminOperation(io, event, payload, null);
@@ -60,16 +87,13 @@ function requireAdminSocket(socket, errorEvent = 'auth-error') {
 function emitRoutingUpdate(io, ticket, { previousAreaId = null } = {}) {
   if (!ticket) return;
   if (previousAreaId && String(previousAreaId) !== String(ticket.area_id || '')) {
-    emitOperational(io, 'ticket-assigned', ticket, previousAreaId);
-    emitOperational(io, 'queue-updated', { ticket }, previousAreaId);
+    emitMinimalAreaOperation(io, 'ticket-removed', { ticketId: ticket.id, reason: 'area_transfer' }, previousAreaId);
   }
-  emitOperational(io, 'ticket-assigned', ticket, ticket.area_id || null);
-  emitOperational(io, 'queue-updated', { ticket }, ticket.area_id || null);
-  if (ticket.assignment?.analyst_id) {
-    io.to(`analyst:${ticket.assignment.analyst_id}`).emit('ticket-assigned', ticket);
-  }
+  const card = toMinimalQueueCard(ticket);
+  emitTicketOperation(io, 'ticket-assigned', ticket, { areaPayload: card });
+  emitClassified(io, { event: 'queue-updated', adminPayload: { ticket }, areaId: ticket.area_id, areaPayload: { ticket: card }, analystId: ticket.assignment?.analyst_id, analystPayload: { ticket } });
   if (ticket.sla?.state === 'warning' || ticket.sla?.state === 'breached') {
-    emitOperational(io, 'sla-alert', { ticketId: ticket.id, sla: ticket.sla }, ticket.area_id || null);
+    emitMinimalAreaOperation(io, 'sla-alert', { ticketId: ticket.id, sla: ticket.sla }, ticket.area_id || null);
   }
 }
 
@@ -78,6 +102,51 @@ function canSelfAssignTicket(socket, ticket) {
   if (!analystId || !ticket) return false;
   const assignedAnalystId = ticket.assignment?.analyst_id;
   return !assignedAnalystId || String(assignedAnalystId) === String(analystId);
+}
+
+function safeClaimIdentifier(value) {
+  if (typeof value !== 'string' && typeof value !== 'number') return null;
+  const normalized = String(value).trim();
+  return normalized && normalized.length <= 128 && /^[A-Za-z0-9_-]+$/.test(normalized) ? normalized : null;
+}
+
+function claimCorrelation(payload) {
+  const ticketId = safeClaimIdentifier(payload?.ticketId);
+  const correlationId = safeClaimIdentifier(payload?.correlationId);
+  return { ...(ticketId ? { ticketId } : {}), ...(correlationId ? { correlationId } : {}) };
+}
+
+async function handleAssignTicket({ socket, io, payload }) {
+  const correlation = claimCorrelation(payload);
+  const reject = (event, message) => socket.emit(event, { ...correlation, message });
+  const ticketId = safeClaimIdentifier(payload?.ticketId);
+  const analystId = safeClaimIdentifier(payload?.analystId);
+  if (!ticketId) return reject('assignment-error', 'El ticket solicitado no es válido.');
+  if (!analystId) return reject('assignment-error', 'El analista solicitado no es válido.');
+  try {
+    let targetAnalystId = analystId;
+    if (!isAdmin(socket.user)) {
+      if (!socket.analyst?.id || String(analystId) !== String(socket.analyst.id)) return reject('auth-error', 'No tienes permisos para asignar tickets a otros analistas.');
+      const candidate = await db.getTicketWithAssignment(ticketId);
+      if (!candidate || (!canAccessTicket(socket.user, socket.analyst, candidate) && !analystCanSeeQueueCard(socket.analyst, candidate))) return reject('auth-error', 'You are not authorized to claim this ticket.');
+      if (!canSelfAssignTicket(socket, candidate)) return reject('assignment-error', 'No puedes tomar un ticket asignado a otro analista.');
+      targetAnalystId = socket.analyst.id;
+    }
+    const expectedRevision = Number(payload?.expectedRevision);
+    const idempotencyKey = safeClaimIdentifier(payload?.idempotencyKey);
+    if (!isAdmin(socket.user) && db.claimConversation && (!Number.isInteger(expectedRevision) || expectedRevision < 0 || !idempotencyKey)) return reject('assignment-error', 'expectedRevision and idempotencyKey are required to claim a conversation.');
+    const result = !isAdmin(socket.user)
+      ? db.claimConversation
+        ? await db.claimConversation({ ticketId, analystId: targetAnalystId, analystAreaId: socket.analyst.area_id, expectedRevision, idempotencyKey, actorName: socket.user.name || 'analyst' })
+        : await db.claimTicket(ticketId, targetAnalystId)
+      : await routing.assignTicket(db, { ticketId, analystId: targetAnalystId, assignedBy: 'manual', actor: socket.user });
+    const ticket = result?.workflow || result;
+    if (!result?.mutation?.replayed) emitRoutingUpdate(io, ticket);
+    socket.emit('assignment-success', { ...correlation, ticketId: safeClaimIdentifier(ticket.id) || ticketId });
+  } catch (err) {
+    console.error('Error asignando ticket:', err.message);
+    reject('assignment-error', err.message || 'No se pudo asignar el ticket.');
+  }
 }
 
 function emitInitialWhatsAppAuthState(socket) {
@@ -96,31 +165,17 @@ function emitInitialWhatsAppAuthState(socket) {
 }
 
 function setupSockets(io, client, borrarSesion) {
-  io.use(async (socket, next) => {
-    const token = socket.handshake.auth?.token || socket.handshake.query?.token;
-    if (!token) {
-      return next(new Error('Acceso no autorizado: Token ausente.'));
-    }
-    try {
-      const user = await db.validateToken(token);
-      if (!user) {
-        return next(new Error('Acceso no autorizado: Token inválido o revocado.'));
-      }
-      socket.user = user;
-      next();
-    } catch (err) {
-      return next(new Error('Acceso no autorizado: Error de red con la base de datos.'));
-    }
-  });
+  io.use(createSocketAuthMiddleware(db.validateToken));
 
   io.on('connection', async (socket) => {
     console.log(`🖥️  Dashboard conectado: ${socket.id} (Usuario: ${socket.user.name}, Rol: ${socket.user.role})`);
 
     let analyst = null;
+    const eventAuth = createSocketEventAuthMiddleware(db.validateToken, db.getAnalystByTokenId);
+    socket.use((packet, next) => eventAuth(socket, packet, next));
+    const stopPassiveAuth = createPassiveSocketRevalidator(socket, db.validateToken, db.getAnalystByTokenId);
     if (socket.user.role === 'admin') {
       socket.join('admin');
-    } else {
-      socket.join('unassigned:agents');
     }
 
     try {
@@ -233,7 +288,6 @@ function setupSockets(io, client, borrarSesion) {
       if (!requireAdminSocket(socket)) return;
       console.log(`🚀 Forzando inicio del bot para: ${chatId}`);
       try {
-        const areaId = await resolveChatArea(chatId);
         store.sesiones[chatId] = { paso: 0 };
         const msgStr = '¡Hola! Bienvenido al canal de soporte de Integraciones de *Magneto365*.\n\n' +
         'Para brindarte una atención más rápida, por favor responde con el número de tu perfil:\n' +
@@ -244,7 +298,7 @@ function setupSockets(io, client, borrarSesion) {
         await client.sendMessage(chatId, msgStr);
         store.sesiones[chatId] = { paso: 'filtro_no' };
         store.chatModes.set(chatId, 'auto');
-        emitAdminOperation(io, 'mode-changed', { chatId, mode: 'auto' }, areaId);
+        await emitAdminChatOperation(io, 'mode-changed', { chatId, mode: 'auto' }, chatId);
       } catch (e) {
         console.error('❌ Error forzando bot:', e.message);
       }
@@ -304,7 +358,7 @@ function setupSockets(io, client, borrarSesion) {
           : null;
 
         const areaId = authorizedTicket?.area_id || null;
-        emitOperational(io, 'new-message', {
+        emitClassified(io, { event: 'new-message', adminPayload: {
           chatId,
           ticketId:    ticketId || null,
           message:     displayBody,
@@ -315,7 +369,10 @@ function setupSockets(io, client, borrarSesion) {
           is_bot:      false,
           timestamp,
           id:          saved?.id
-        }, areaId);
+        }, analystId: authorizedTicket?.assignment?.analyst_id, analystPayload: {
+          chatId, ticketId: ticketId || null, message: displayBody, media: mediaMetadata, mediaUpload,
+          waMessageId, from_user: false, is_bot: false, timestamp, id: saved?.id,
+        }});
       } catch (err) {
         console.error('Error enviando mensaje manual:', err);
         socket.emit('send-error', { message: 'No se pudo enviar el mensaje.' });
@@ -350,56 +407,27 @@ function setupSockets(io, client, borrarSesion) {
       }
     });
 
-    socket.on('assign-ticket', async ({ ticketId, analystId }) => {
-      try {
-        let targetAnalystId = analystId;
-        if (!isAdmin(socket.user)) {
-          if (!socket.analyst?.id || String(analystId) !== String(socket.analyst.id)) {
-            socket.emit('auth-error', { message: 'No tienes permisos para asignar tickets a otros analistas.' });
-            return;
-          }
-          const authorizedTicket = await requireAuthorizedTicket(socket, ticketId);
-          if (!authorizedTicket) return;
-          if (!canSelfAssignTicket(socket, authorizedTicket)) {
-            socket.emit('assignment-error', { message: 'No puedes tomar un ticket asignado a otro analista.' });
-            return;
-          }
-          targetAnalystId = socket.analyst.id;
-        }
-
-        const ticket = await routing.assignTicket(db, {
-          ticketId,
-          analystId: targetAnalystId,
-          assignedBy: isAdmin(socket.user) ? 'manual' : 'self',
-          actor: socket.user,
-        });
-        emitRoutingUpdate(io, ticket);
-      } catch (err) {
-        console.error('Error asignando ticket:', err.message);
-        socket.emit('assignment-error', { message: err.message || 'No se pudo asignar el ticket.' });
-      }
-    });
+    socket.on('assign-ticket', payload => handleAssignTicket({ socket, io, payload }));
 
     socket.on('transfer-ticket', async ({ ticketId, areaId, analystId }) => {
       if (!requireAdminSocket(socket, 'assignment-error')) return;
       try {
-        const previousTicket = await db.getTicketById(ticketId);
         const ticket = await routing.transferTicket(db, { ticketId, areaId, analystId, actor: socket.user });
-        emitRoutingUpdate(io, ticket, { previousAreaId: previousTicket?.area_id || null });
+        emitRoutingUpdate(io, ticket, { previousAreaId: ticket.previous_area_id || null });
       } catch (err) {
         console.error('Error transfiriendo ticket:', err.message);
-        socket.emit('assignment-error', { message: err.message || 'No se pudo transferir el ticket.' });
+        socket.emit('assignment-error', { ticketId, correlationId: String(ticketId), message: err.message || 'No se pudo transferir el ticket.' });
       }
     });
 
     socket.on('unassign-ticket', async ({ ticketId }) => {
       if (!requireAdminSocket(socket, 'assignment-error')) return;
       try {
-        const ticket = await routing.unassignTicket(db, ticketId, { assignedBy: 'manual' });
+        const ticket = await routing.unassignTicket(db, ticketId, { assignedBy: 'manual', actor: socket.user });
         emitRoutingUpdate(io, ticket);
       } catch (err) {
         console.error('Error desasignando ticket:', err.message);
-        socket.emit('assignment-error', { message: err.message || 'No se pudo desasignar el ticket.' });
+        socket.emit('assignment-error', { ticketId, correlationId: String(ticketId), message: err.message || 'No se pudo desasignar el ticket.' });
       }
     });
 
@@ -418,17 +446,18 @@ function setupSockets(io, client, borrarSesion) {
       const result = await ticketClose.closeTicket({ ticketId, actor: socket.user, sendFarewell: true, whatsappClient: client });
 
       if (result.farewellSent && ticketData?.telefono) {
-        emitOperational(io, 'new-message', {
+        emitTicketOperation(io, 'new-message', {
           chatId:    ticketData.telefono,
           ticketId,
           message:   ticketClose.DEFAULT_FAREWELL,
           from_user: false,
           is_bot:    true,
           timestamp: new Date().toISOString(),
-        }, ticketData?.area_id || null);
+          area_id: ticketData?.area_id, assignment: ticketData?.assignment,
+        });
       }
 
-      emitOperational(io, 'ticket-closed', { ticketId }, ticketData?.area_id || null);
+      emitMinimalAreaOperation(io, 'ticket-closed', { ticketId }, ticketData?.area_id || null);
       Object.keys(store.sesiones).forEach(chatId => {
         if (store.sesiones[chatId]?.ticketId === ticketId) delete store.sesiones[chatId];
       });
@@ -445,7 +474,7 @@ function setupSockets(io, client, borrarSesion) {
       if (ticketId) {
         await db.deleteTicket(ticketId);
       }
-      emitOperational(io, 'chat-deleted', { contactKey }, areaId);
+      emitMinimalAreaOperation(io, 'chat-deleted', { ticketId }, areaId);
     });
 
     // AI Copilot Endpoints
@@ -507,21 +536,21 @@ function setupSockets(io, client, borrarSesion) {
         await db.closeTicket(targetTicketId);
         await db.saveMessage({ ticket_id: targetTicketId, chat_id: telefonoDestino || '', body: mensajeDerivacion, from_user: false, is_bot: true });
         const areaId = await resolveTicketArea(targetTicketId);
-        emitOperational(io, 'ticket-closed', { ticketId: targetTicketId }, areaId);
+        emitMinimalAreaOperation(io, 'ticket-closed', { ticketId: targetTicketId }, areaId);
       }
 
       if (telefonoDestino) {
         try {
           await client.sendMessage(telefonoDestino, mensajeDerivacion);
           const areaId = await resolveTicketArea(targetTicketId);
-          emitOperational(io, 'new-message', {
+          emitClassified(io, { event: 'new-message', adminPayload: {
             chatId:    telefonoDestino,
             ticketId:  targetTicketId || null,
             message:   mensajeDerivacion,
             from_user: false,
             is_bot:    true,
             timestamp: new Date().toISOString(),
-          }, areaId);
+          }});
         } catch (e) {
           console.warn('Error enviando mensaje de derivación:', e.message);
         }
@@ -543,9 +572,10 @@ function setupSockets(io, client, borrarSesion) {
     });
 
     socket.on('disconnect', () => {
+      stopPassiveAuth();
       console.log('🖥️  Dashboard desconectado:', socket.id);
     });
   });
 }
 
-module.exports = { setupSockets, canSelfAssignTicket, emitInitialWhatsAppAuthState, emitAdminOperation, emitAdminChatOperation, emitRoutingUpdate };
+module.exports = { setupSockets, canSelfAssignTicket, handleAssignTicket, safeClaimIdentifier, disconnectSocketsForToken, emitInitialWhatsAppAuthState, emitAdminOperation, emitAdminChatOperation, emitRoutingUpdate };

@@ -39,7 +39,8 @@ test('autoRouteTicket assigns an area ticket to the first available analyst', as
 
   assert.equal(routed.assignment.analyst_id, 3);
   assert.equal(routed.assignment.assigned_by, 'auto');
-  assert.ok(routed.sla.due_at);
+  assert.equal(routed.sla.state, 'unconfigured');
+  assert.equal(routed.sla.due_at, null);
 });
 
 test('autoRouteTicket only auto-assigns area-scoped tickets and keeps null-area tickets unassigned', async () => {
@@ -102,43 +103,16 @@ test('transferTicket rejects unknown target areas before mutating area or assign
   assert.deepEqual(db.state.assignment, { ticket_id: 10, analyst_id: 3, assigned_by: 'manual' });
 });
 
-test('computeSla returns warning and breached states from ticket timestamps', () => {
-  const warning = routing.computeSla({ created_at: '2026-07-09T10:00:00.000Z', status: 'open', area: { sla_minutes: 30 } }, new Date('2026-07-09T10:26:00.000Z'));
-  const breached = routing.computeSla({ created_at: '2026-07-09T10:00:00.000Z', status: 'open', area: { sla_minutes: 30 } }, new Date('2026-07-09T10:31:00.000Z'));
-
-  assert.equal(warning.state, 'warning');
-  assert.equal(breached.state, 'breached');
+test('computeSla uses the captured support snapshot and append-only segments', () => {
+  const ticket = { sla_snapshots: [{ id: 1, clock_type: 'support', target_minutes: 30, warning_minutes: 5, clock_mode: '24x7', policy_version: 2, sla_clock_segments: [{ started_at: '2026-07-09T10:00:00.000Z' }] }] };
+  assert.equal(routing.computeSla(ticket, new Date('2026-07-09T10:26:00.000Z')).state, 'warning');
+  assert.equal(routing.computeSla(ticket, new Date('2026-07-09T10:30:00.000Z')).state, 'breached');
+  assert.equal(routing.computeSla(ticket, new Date('2026-07-09T10:30:00.000Z')).policy_version, 2);
 });
 
-test('computeSla marks the exact due time as breached', () => {
-  const sla = routing.computeSla({ created_at: '2026-07-09T10:00:00.000Z', status: 'open', area: { sla_minutes: 30 } }, new Date('2026-07-09T10:30:00.000Z'));
-
-  assert.equal(sla.state, 'breached');
-  assert.equal(sla.minutes_remaining, 0);
-});
-
-test('computeSla clamps future timestamps to zero age', () => {
-  const sla = routing.computeSla({ created_at: '2026-07-09T11:00:00.000Z', status: 'open', area: { sla_minutes: 30 } }, new Date('2026-07-09T10:00:00.000Z'));
-
-  assert.equal(sla.state, 'ok');
-  assert.equal(sla.age_minutes, 0);
-});
-
-test('computeSla keeps closed tickets out of warning and breached states', () => {
-  const sla = routing.computeSla({ created_at: '2026-07-09T10:00:00.000Z', closed_at: '2026-07-09T11:00:00.000Z', status: 'closed', area: { sla_minutes: 30 } }, new Date('2026-07-09T12:00:00.000Z'));
-
-  assert.equal(sla.state, 'ok');
-  assert.equal(sla.minutes_remaining, -30);
-});
-
-test('computeSla returns null for invalid created_at', () => {
-  assert.equal(routing.computeSla({ created_at: 'not-a-date', status: 'open', area: { sla_minutes: 30 } }), null);
-});
-
-test('computeSla falls back to default SLA for invalid or non-positive SLA values', () => {
-  const invalid = routing.computeSla({ created_at: '2026-07-09T10:00:00.000Z', status: 'open', area: { sla_minutes: 'invalid' } }, new Date('2026-07-09T10:01:00.000Z'));
-  const nonPositive = routing.computeSla({ created_at: '2026-07-09T10:00:00.000Z', status: 'open', area: { sla_minutes: 0 } }, new Date('2026-07-09T10:01:00.000Z'));
-
-  assert.equal(invalid.sla_minutes, routing.DEFAULT_SLA_MINUTES);
-  assert.equal(nonPositive.sla_minutes, routing.DEFAULT_SLA_MINUTES);
+test('computeSla reports unconfigured without inventing a deadline', () => {
+  const sla = routing.computeSla({ created_at: '2026-07-09T10:00:00.000Z', area: { sla_minutes: 30 } });
+  assert.equal(sla.state, 'unconfigured');
+  assert.equal(sla.due_at, null);
+  assert.equal(sla.minutes_remaining, null);
 });

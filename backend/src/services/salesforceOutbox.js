@@ -237,7 +237,6 @@ function withOutboxDbTimeout(operation, timeoutMs) {
       error.statusCode = 503;
       reject(error);
     }, timeoutMs);
-    timer.unref?.();
   });
   return Promise.race([Promise.resolve().then(operation), timeout]).finally(() => clearTimeout(timer));
 }

@@ -1,7 +1,4 @@
-const DEFAULT_SLA_MINUTES = 30;
-const SLA_WARNING_MINUTES_FLOOR = 5;
-const SLA_WARNING_RATIO = 0.2;
-const MS_PER_MINUTE = 60000;
+const { presentSla } = require('./conversationWorkflow');
 
 function normalizeId(value) {
   if (value === undefined || value === null || value === '') return null;
@@ -27,32 +24,7 @@ function normalizeTicket(ticket) {
 
 function computeSla(ticket, now = new Date()) {
   const normalized = normalizeTicket(ticket);
-  if (!normalized?.created_at) return null;
-
-  const createdAt = new Date(normalized.created_at);
-  if (Number.isNaN(createdAt.getTime())) return null;
-
-  const closedAt = normalized.closed_at ? new Date(normalized.closed_at) : null;
-  const endAt = normalized.status === 'closed' && closedAt && !Number.isNaN(closedAt.getTime()) ? closedAt : now;
-  const slaMinutes = Number(normalized.area?.sla_minutes || normalized.sla_minutes || DEFAULT_SLA_MINUTES);
-  const safeSlaMinutes = Number.isFinite(slaMinutes) && slaMinutes > 0 ? slaMinutes : DEFAULT_SLA_MINUTES;
-  const ageMinutes = Math.max(0, Math.floor((endAt.getTime() - createdAt.getTime()) / MS_PER_MINUTE));
-  const dueAt = new Date(createdAt.getTime() + safeSlaMinutes * MS_PER_MINUTE);
-  const minutesRemaining = Math.ceil((dueAt.getTime() - endAt.getTime()) / MS_PER_MINUTE);
-
-  let state = 'ok';
-  if (normalized.status !== 'closed') {
-    if (minutesRemaining <= 0) state = 'breached';
-    else if (minutesRemaining <= Math.max(SLA_WARNING_MINUTES_FLOOR, Math.ceil(safeSlaMinutes * SLA_WARNING_RATIO))) state = 'warning';
-  }
-
-  return {
-    state,
-    age_minutes: ageMinutes,
-    due_at: dueAt.toISOString(),
-    minutes_remaining: minutesRemaining,
-    sla_minutes: safeSlaMinutes,
-  };
+  return presentSla(normalized, now).support || { state: 'unconfigured', status: 'unconfigured', due_at: null, minutes_remaining: null };
 }
 
 function enrichTicket(ticket, now = new Date()) {
@@ -92,6 +64,9 @@ async function autoRouteTicket(db, ticketOrId) {
 }
 
 async function assignTicket(db, { ticketId, analystId, assignedBy = 'manual', actor = null }) {
+  if (assignedBy === 'manual' && db.adminRouteTicket) return enrichTicket(await db.adminRouteTicket({
+    action: 'assign', ticketId, analystId, actorName: actor?.name || 'admin', metadata: { explicit_override: true },
+  }));
   const ticket = await db.getTicketById(ticketId);
   if (!ticket) {
     const err = new Error('Ticket not found.');
@@ -127,12 +102,18 @@ async function assignTicket(db, { ticketId, analystId, assignedBy = 'manual', ac
   return enrichTicket(await db.getTicketWithRouting(ticket.id));
 }
 
-async function unassignTicket(db, ticketId, { assignedBy = 'manual' } = {}) {
+async function unassignTicket(db, ticketId, { assignedBy = 'manual', actor = null } = {}) {
+  if (assignedBy === 'manual' && db.adminRouteTicket) return enrichTicket(await db.adminRouteTicket({
+    action: 'unassign', ticketId, actorName: actor?.name || 'admin', metadata: { explicit_override: true },
+  }));
   await db.unassignTicket(ticketId, { assigned_by: assignedBy });
   return enrichTicket(await db.getTicketWithRouting(ticketId));
 }
 
 async function transferTicket(db, { ticketId, areaId, analystId = null, actor = null }) {
+  if (db.adminRouteTicket) return enrichTicket(await db.adminRouteTicket({
+    action: 'transfer', ticketId, areaId, analystId, actorName: actor?.name || 'admin', metadata: { explicit_override: true },
+  }));
   const safeAreaId = normalizeId(areaId);
   if (!safeAreaId) {
     const err = new Error('area_id must be a positive integer.');
@@ -188,9 +169,6 @@ async function transferTicket(db, { ticketId, areaId, analystId = null, actor = 
 }
 
 module.exports = {
-  DEFAULT_SLA_MINUTES,
-  SLA_WARNING_MINUTES_FLOOR,
-  SLA_WARNING_RATIO,
   autoRouteTicket,
   assignTicket,
   chooseAvailableAnalyst,
