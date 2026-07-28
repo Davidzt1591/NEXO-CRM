@@ -1,24 +1,18 @@
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || (import.meta.env.DEV ? 'http://localhost:3001' : '');
+import { getBackendOrigin } from './backendOrigin';
+import { INVALID_AUTH_CODES, invalidateCurrentSession } from './authSession';
+
+const API_BASE_URL = getBackendOrigin();
 const NON_JSON_API_ERROR = 'No se pudo conectar con la API del backend. La respuesta no fue JSON.';
 const INVALID_JSON_API_ERROR = 'La API respondió con JSON inválido. Intenta de nuevo y revisa la respuesta del backend si el problema continúa.';
+export const RATE_LIMITED_EVENT = 'nexo:rate-limited';
+export const RATE_LIMIT_RECOVERED_EVENT = 'nexo:rate-limit-recovered';
 
-export function getAuthToken() {
-  return localStorage.getItem('nexo_token') || '';
+function requestSignature(path, options) {
+  return `${String(options.method || 'GET').toUpperCase()} ${resolveApiUrl(path)}`;
 }
 
-function isTrustedApiPath(path) {
-  try {
-    const requestUrl = new URL(resolveApiUrl(path), window.location.origin);
-    const backendUrl = API_BASE_URL ? new URL(API_BASE_URL, window.location.origin) : null;
-
-    return (
-      requestUrl.origin === window.location.origin && requestUrl.pathname.startsWith('/api/')
-    ) || (
-      backendUrl && requestUrl.origin === backendUrl.origin
-    );
-  } catch {
-    return false;
-  }
+function notifyRateLimit(name, detail) {
+  if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent(name, { detail }));
 }
 
 function resolveApiUrl(path) {
@@ -47,24 +41,31 @@ function createApiError(message, response, contentType, text, data = null) {
   error.contentType = contentType;
   error.bodySnippet = text.slice(0, 160);
   error.data = data;
+  error.code = data?.code || null;
   return error;
 }
 
 export async function apiRequest(path, options = {}) {
-  const token = getAuthToken();
-  const headers = new Headers(options.headers || {});
+  const signature = requestSignature(path, options);
+  const { sensitiveResponse = false, ...fetchOptions } = options;
+  const headers = new Headers(fetchOptions.headers || {});
 
-  if (token && isTrustedApiPath(path)) headers.set('Authorization', `Bearer ${token}`);
-  if (options.body && !headers.has('Content-Type')) {
+  if (fetchOptions.body && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }
 
   const response = await fetch(resolveApiUrl(path), {
-    ...options,
+    ...fetchOptions,
     headers,
+    credentials: 'include',
   });
 
   const contentType = response.headers.get('Content-Type') || '';
+  if (sensitiveResponse && !response.ok) {
+    const error = new Error('No se pudo completar la operación sensible.');
+    error.status = response.status;
+    throw error;
+  }
   const text = await response.text();
 
   if (text && !contentType.toLowerCase().includes('application/json')) {
@@ -84,10 +85,22 @@ export async function apiRequest(path, options = {}) {
 
   if (!response.ok) {
     const error = new Error(data?.error || 'Request failed.');
-    Object.assign(error, responseMetadata(response, contentType, text), { data });
+    const retryAfterHeader = response.headers.get('Retry-After');
+    const headerRetryAfter = retryAfterHeader === null ? NaN : Number(retryAfterHeader);
+    const retryAfterSeconds = data?.retryAfterSeconds != null && Number.isFinite(Number(data.retryAfterSeconds))
+      ? Math.max(1, Math.ceil(Number(data.retryAfterSeconds)))
+      : Number.isFinite(headerRetryAfter) ? Math.max(1, Math.ceil(headerRetryAfter)) : null;
+    Object.assign(error, responseMetadata(response, contentType, text), { data, code: data?.code || null, retryAfterSeconds });
+    if (response.status === 401 && INVALID_AUTH_CODES.has(error.code)) invalidateCurrentSession({ code: error.code });
+    if (error.code === 'RATE_LIMITED') notifyRateLimit(RATE_LIMITED_EVENT, {
+      signature,
+      retryAfterSeconds,
+      message: error.message,
+    });
     throw error;
   }
 
+  notifyRateLimit(RATE_LIMIT_RECOVERED_EVENT, { signature });
   return data;
 }
 

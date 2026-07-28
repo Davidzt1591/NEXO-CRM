@@ -174,6 +174,95 @@ describe('registerNexoSocketHandlers', () => {
     expect(socket.emit).toHaveBeenCalledWith('get-messages', 42);
   });
 
+  it.each([
+    ['generic transport failure', new Error('websocket error')],
+    ['timeout', new Error('timeout')],
+    ['auth service outage', Object.assign(new Error('unavailable'), { data: { code: 'AUTH_UNAVAILABLE' } })],
+  ])('preserves authentication for %s', (_, error) => {
+    const socket = createSocket();
+    const setIsAuthenticated = vi.fn();
+    const setBotStatus = vi.fn();
+    registerNexoSocketHandlers(socket, createOptions({ setIsAuthenticated, setBotStatus }));
+
+    handlerFor(socket, 'connect_error')(error);
+
+    expect(setIsAuthenticated).not.toHaveBeenCalled();
+    expect(setBotStatus).toHaveBeenCalledWith('disconnected');
+    expect(socket.disconnect).not.toHaveBeenCalled();
+  });
+
+  it('reconnects after AUTH_UNAVAILABLE and cancels pending recovery after success and cleanup', () => {
+    vi.useFakeTimers();
+    const socket = createSocket();
+    const cleanupHandlers = registerNexoSocketHandlers(socket, createOptions());
+    handlerFor(socket, 'connect_error')(Object.assign(new Error('unavailable'), { data: { code: 'AUTH_UNAVAILABLE' } }));
+    handlerFor(socket, 'connect_error')(Object.assign(new Error('unavailable'), { data: { code: 'AUTH_UNAVAILABLE' } }));
+    vi.runAllTimers();
+    expect(socket.connect).toHaveBeenCalledTimes(1);
+    handlerFor(socket, 'connect')();
+    vi.runAllTimers();
+    expect(socket.connect).toHaveBeenCalledTimes(1);
+    handlerFor(socket, 'connect_error')(Object.assign(new Error('unavailable'), { data: { code: 'AUTH_UNAVAILABLE' } }));
+    cleanupHandlers();
+    vi.runAllTimers();
+    expect(socket.connect).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+
+  it.each(['AUTH_INVALID', 'AUTH_REVOKED'])('invalidates authentication only for explicit %s', (code) => {
+    const socket = createSocket();
+    const invalidated = vi.fn();
+    window.addEventListener('nexo:auth-invalidated', invalidated, { once: true });
+    registerNexoSocketHandlers(socket, createOptions());
+
+    handlerFor(socket, 'connect_error')(Object.assign(new Error('denied'), { data: { code, attemptId: 'attempt-1' } }));
+
+    expect(invalidated).toHaveBeenCalledTimes(1);
+  });
+
+  it('forwards targeted AUTH_REVOKED events to the session lifecycle and removes that listener on cleanup', () => {
+    const socket = createSocket();
+    const invalidated = vi.fn();
+    window.addEventListener('nexo:auth-invalidated', invalidated);
+    const cleanupHandlers = registerNexoSocketHandlers(socket, createOptions());
+    const authErrorHandler = handlerFor(socket, 'auth-error');
+
+    authErrorHandler({ code: 'AUTH_REVOKED' });
+
+    expect(invalidated).toHaveBeenCalledOnce();
+    expect(invalidated.mock.calls[0][0].detail).toEqual({ code: 'AUTH_REVOKED' });
+    cleanupHandlers();
+    expect(socket.off).toHaveBeenCalledWith('auth-error', authErrorHandler);
+    window.removeEventListener('nexo:auth-invalidated', invalidated);
+  });
+
+  it('rejects unavailable privileged events and reconnects without invalidating the session', () => {
+    vi.useFakeTimers();
+    const socket = createSocket();
+    const invalidated = vi.fn();
+    window.addEventListener('nexo:auth-invalidated', invalidated, { once: true });
+    registerNexoSocketHandlers(socket, createOptions());
+    handlerFor(socket, 'auth-error')({ code: 'AUTH_UNAVAILABLE' });
+    expect(socket.disconnect).toHaveBeenCalledOnce();
+    expect(invalidated).not.toHaveBeenCalled();
+    vi.runAllTimers();
+    expect(socket.connect).toHaveBeenCalledOnce();
+    vi.useRealTimers();
+  });
+
+  it('invalidates the cookie session for an explicit handshake auth failure', () => {
+    const socket = createSocket();
+    const invalidated = vi.fn();
+    window.addEventListener('nexo:auth-invalidated', invalidated, { once: true });
+    registerNexoSocketHandlers(socket, createOptions());
+
+    handlerFor(socket, 'connect_error')(Object.assign(new Error('denied'), {
+      data: { code: 'AUTH_INVALID', attemptId: 'old-attempt' },
+    }));
+
+    expect(invalidated).toHaveBeenCalledTimes(1);
+  });
+
   it('disconnects the app-owned socket on authenticated lifecycle cleanup', () => {
     const socket = createSocket();
 

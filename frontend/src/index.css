@@ -1,5 +1,3 @@
-@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap');
-
 :root {
   --bg-dark: #070914; 
   --bg-panel: rgba(18, 23, 43, 0.45);
@@ -47,7 +45,7 @@
   flex-direction: column;
 }
 body {
-  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-family: 'Lato', sans-serif;
   background-color: var(--bg-dark);
   color: var(--text-primary);
   background-image: 
@@ -57,7 +55,22 @@ body {
   background-attachment: fixed; overflow: hidden;
 }
 
-h1, h2, h3, h4, h5, h6, .brand-text { font-family: 'Outfit', sans-serif; }
+/* Corporate typography boundary: local Lato wins over untouched legacy declarations. */
+#root,
+#root button,
+#root input,
+#root textarea,
+#root select,
+#root h1,
+#root h2,
+#root h3,
+#root h4,
+#root h5,
+#root h6 {
+  font-family: 'Lato', sans-serif;
+}
+
+h1, h2, h3, h4, h5, h6, .brand-text { font-family: 'Lato', sans-serif; }
 
 button { background: transparent; border: none; font-family: inherit; color: inherit; cursor: pointer; outline: none; padding: 0; margin: 0; }
 input { outline: none; font-family: inherit; }
@@ -173,6 +186,8 @@ svg { flex-shrink: 0; max-width: 100%; max-height: 100%; }
   font-weight: 700;
   text-shadow: none;
 }
+.filter-tab--candidate { min-height: 44px; }
+.filter-tab:focus-visible { outline: 3px solid var(--neon-cyan); outline-offset: 2px; }
 
 .contact-list { flex: 1; overflow-y: auto; padding: 0 16px 16px; }
 .contact-list__empty { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; color: var(--text-tertiary); gap: 16px; text-align: center;}
@@ -206,13 +221,13 @@ svg { flex-shrink: 0; max-width: 100%; max-height: 100%; }
 .chat-area { flex: 1; display: flex; flex-direction: column; background: transparent; position: relative; }
 
 .chat-header {
-  height: 68px; padding: 0 32px; display: flex; align-items: center; justify-content: space-between;
+  min-height: 68px; padding: 0 32px; display: flex; align-items: center; justify-content: space-between;
   border-bottom: 1px solid var(--border-light); background: rgba(7, 9, 20, 0.3); backdrop-filter: blur(10px);
 }
-.chat-header__left { display: flex; align-items: center; gap: 16px; min-width: 0; }
+.chat-header__left { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; min-width: 0; }
 .chat-header__name { font-family: 'Outfit', sans-serif; font-size: 17px; font-weight: 700; letter-spacing: 0.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px; }
 .chat-header__sub { font-size: 13px; color: var(--text-muted); font-weight: 500; display: flex; align-items: center; gap: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 250px;}
-.chat-header__actions { display: flex; align-items: center; gap: 12px; }
+.chat-header__actions { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 8px 12px; min-width: 0; }
 
 .messages-area { flex: 1; padding: 40px; overflow-y: auto; display: flex; flex-direction: column; gap: 24px; }
 .messages-area__empty { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--text-tertiary); font-family: 'Outfit'; font-size: 18px; letter-spacing: 1px;}
@@ -985,6 +1000,31 @@ svg { flex-shrink: 0; max-width: 100%; max-height: 100%; }
   flex-direction: column;
 }
 
+/* Floating Command Beacon: navigation stays available without taxing workspace width. */
+.admin-body { position: relative; }
+.admin-command-dock { position: absolute; z-index: 40; left: 18px; top: 18px; display: flex; align-items: flex-start; gap: 10px; pointer-events: none; }
+.admin-command-dock__launcher { pointer-events: auto; min-width: 54px; min-height: 54px; padding: 0 14px; display: flex; align-items: center; gap: 9px; color: #eafcff; background: rgba(6,18,28,.92); border: 1px solid rgba(0,240,255,.28); border-radius: 18px; box-shadow: 0 14px 42px rgba(0,0,0,.36); backdrop-filter: blur(22px); font-weight: 800; }
+.admin-command-dock__launcher span { white-space: nowrap; }
+.admin-command-dock__surface { pointer-events: auto; width: min(330px, calc(100vw - 100px)); max-height: calc(100dvh - 136px); padding: 14px; overflow: hidden auto; color: white; background: rgba(8,15,29,.94); border: 1px solid rgba(148,163,184,.16); border-radius: 20px; box-shadow: 0 24px 70px rgba(0,0,0,.38); backdrop-filter: blur(26px); }
+.admin-command-dock--expanded .admin-command-dock__surface { pointer-events: auto; opacity: 1; visibility: visible; transform: none; }
+.admin-command-dock__surface header { padding: 4px 6px 12px; display: grid; gap: 3px; border-bottom: 1px solid rgba(148,163,184,.12); }
+.admin-command-dock__surface header span { color: var(--neon-cyan); font-size: 10px; font-weight: 900; letter-spacing: .14em; text-transform: uppercase; }
+.admin-command-dock__surface nav { padding-top: 8px; display: grid; gap: 4px; }
+.admin-command-dock__surface nav button { min-height: 52px; padding: 7px; display: grid; grid-template-columns: 38px 1fr; align-items: center; gap: 10px; text-align: left; border: 1px solid transparent; border-radius: 12px; }
+.admin-command-dock__surface nav button:hover,.admin-command-dock__surface nav button:focus-visible { background: rgba(255,255,255,.055); border-color: rgba(0,240,255,.2); outline: none; }
+.admin-command-dock__surface nav button.is-current { background: rgba(0,240,255,.09); border-color: rgba(0,240,255,.28); }
+.admin-command-dock__surface nav button>span:last-child { min-width: 0; display: grid; gap: 3px; }
+.admin-command-dock__surface nav small { color: var(--text-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.admin-command-dock__icon { width: 38px; height: 38px; display: grid; place-items: center; color: var(--neon-cyan); background: rgba(0,240,255,.08); border-radius: 11px; }
+.admin-command-dock__surface .is-current .admin-command-dock__icon { color: #041015; background: var(--neon-cyan); }
+.admin-workspace { padding-left: 32px; }
+.admin-shell--studio-focus { height: 100dvh; }
+.admin-shell--studio-focus .admin-topbar,.admin-shell--studio-focus .admin-module-header,.admin-shell--studio-focus .admin-flow-manager>.admin-section-heading,.admin-shell--studio-focus .admin-flow-manager>.admin-helper-text { display: none; }
+.admin-shell--studio-focus .admin-workspace { padding: 0; gap: 0; overflow: hidden; }
+.admin-shell--studio-focus .admin-flow-manager { min-height: 0; height: 100%; display: flex; flex-direction: column; }
+.admin-shell--studio-focus .studio-scope-controls { position: absolute; z-index: 18; top: 10px; left: 50%; transform: translateX(-50%); margin: 0; padding: 7px 10px; background: rgba(6,18,22,.94); border: 1px solid rgba(117,190,202,.2); border-radius: 10px; }
+.admin-shell--studio-focus .admin-command-dock { top: 10px; left: 10px; }
+
 .admin-shell--centered {
   align-items: center;
   justify-content: center;
@@ -1010,6 +1050,7 @@ svg { flex-shrink: 0; max-width: 100%; max-height: 100%; }
   align-items: center;
   gap: 16px;
 }
+.admin-topbar__logo { width: 146px; margin-right: 8px; }
 
 .admin-topbar h1,
 .admin-hero-card h2,
@@ -1028,7 +1069,7 @@ svg { flex-shrink: 0; max-width: 100%; max-height: 100%; }
   min-height: 0;
   flex: 1;
   display: grid;
-  grid-template-columns: 320px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   overflow: hidden;
 }
 
@@ -1968,19 +2009,14 @@ svg { flex-shrink: 0; max-width: 100%; max-height: 100%; }
 .admin-mini-spinner { width: 22px; height: 22px; margin: 0; box-shadow: none; }
 
 @media (max-width: 1180px) {
+  .chat-header { height: auto; padding-block: 12px; flex-wrap: wrap; gap: 10px 16px; }
+  .chat-header__left { flex: 1 1 280px; }
+  .chat-header__actions { flex: 1 1 100%; justify-content: flex-start; }
+  .chat-header__actions .action-btn,
+  .chat-header__actions .tag-btn { min-height: 44px; }
+  .chat-header__actions .action-btn--icon { width: 44px; height: 44px; }
+  .contact-tag-selector { height: auto; }
   .admin-body { grid-template-columns: 1fr; overflow-y: auto; }
-  .admin-rail {
-    position: sticky;
-    top: 0;
-    z-index: 8;
-    display: block;
-    padding: 14px 18px;
-    border-right: 0;
-    border-bottom: 1px solid rgba(255,255,255,0.075);
-  }
-  .admin-rail__header { display: none; }
-  .admin-rail__nav { flex-direction: row; overflow-x: auto; padding-bottom: 4px; }
-  .admin-rail-link { min-width: 190px; }
   .admin-hero-card,
   .admin-grid,
   .admin-flow-layout,
@@ -1992,13 +2028,25 @@ svg { flex-shrink: 0; max-width: 100%; max-height: 100%; }
 }
 
 @media (max-width: 760px) {
+  .chat-header { padding: 10px 14px; align-items: flex-start; }
+  .chat-header__left { width: 100%; flex-basis: 100%; }
+  .chat-header__left > div { min-width: 0; flex: 1; }
+  .chat-header__name,
+  .chat-header__sub { max-width: 100%; }
+  .chat-header__actions { width: 100%; gap: 8px; }
+  .contact-tag-selector { margin-right: 0; padding-right: 8px; gap: 6px; }
+  .action-btn--candidate { flex: 1 1 auto; justify-content: center; }
   .admin-topbar { height: auto; padding: 18px; flex-direction: column; align-items: flex-start; }
   .admin-topbar__actions { width: 100%; flex-wrap: wrap; }
   .admin-module-header { align-items: flex-start; flex-direction: column; }
-  .admin-rail { padding: 12px; }
-  .admin-rail-link { min-width: 170px; grid-template-columns: 30px minmax(0, 1fr); }
-  .admin-rail-link__icon { width: 30px; height: 30px; }
-  .admin-workspace { padding: 18px; }
+  .admin-workspace { padding: 18px 18px calc(92px + env(safe-area-inset-bottom)); }
+  .admin-command-dock { position: fixed; top: auto; left: 50%; bottom: calc(10px + env(safe-area-inset-bottom)); transform: translateX(-50%); flex-direction: column-reverse; align-items: center; }
+  .admin-command-dock__launcher { min-height: 52px; border-radius: 999px; }
+  .admin-command-dock__surface { width: calc(100vw - 24px); max-height: min(70dvh, 620px); transform: translateY(12px) scale(.98); transform-origin: bottom center; }
+  .admin-command-dock:not(.admin-command-dock--expanded) .admin-command-dock__surface { display: none; }
+  .admin-command-dock--expanded .admin-command-dock__surface { transform: none; }
+  .admin-shell--studio-focus .admin-command-dock { top: auto; left: 50%; bottom: calc(8px + env(safe-area-inset-bottom)); }
+  .admin-shell--studio-focus .studio-scope-controls { position: static; transform: none; margin: 0; border-radius: 0; }
   .admin-hero-card, .admin-card { padding: 18px; border-radius: 18px; }
   .admin-stat-grid, .admin-form__row, .admin-form__row--thirds, .admin-report-grid, .admin-outbox-grid { grid-template-columns: 1fr; }
 }
@@ -2022,10 +2070,8 @@ svg { flex-shrink: 0; max-width: 100%; max-height: 100%; }
   justify-content: center;
   width: 100vw;
   height: 100vh;
-  background-color: var(--bg-dark);
-  background-image: 
-    radial-gradient(circle at 10% 20%, rgba(157, 78, 221, 0.15), transparent 45%),
-    radial-gradient(circle at 90% 80%, rgba(0, 240, 255, 0.15), transparent 45%);
+  background: var(--mg-navy, #002b49);
+  font-family: 'Lato', sans-serif;
 }
 
 .login-card {
@@ -2042,19 +2088,9 @@ svg { flex-shrink: 0; max-width: 100%; max-height: 100%; }
   align-items: center;
 }
 
-.login-logo {
-  width: 60px;
-  height: 60px;
-  background: linear-gradient(135deg, var(--neon-purple), var(--neon-cyan));
-  border-radius: 18px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: 800;
-  font-size: 32px;
-  font-family: 'Outfit';
-  box-shadow: var(--shadow-glow);
-  color: white;
+.login-magneto-logo {
+  width: min(230px, 72vw);
+  height: auto;
   margin-bottom: 24px;
 }
 
@@ -2064,9 +2100,22 @@ svg { flex-shrink: 0; max-width: 100%; max-height: 100%; }
   letter-spacing: 2px;
   color: white;
   margin-bottom: 8px;
-  background: linear-gradient(90deg, #fff, #94a3b8);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
+  font-family: 'Lato', sans-serif;
+}
+
+.login-card:focus,
+.login-title:focus,
+.login-input:focus-visible,
+.login-submit-btn:focus-visible {
+  outline: 3px solid var(--mg-lime, #cbfd47);
+  outline-offset: 3px;
+}
+
+.qr-panel__magneto-logo {
+  display: block;
+  width: min(190px, 60vw);
+  height: auto;
+  margin: 0 auto 16px;
 }
 
 .login-subtitle {
@@ -2161,3 +2210,28 @@ svg { flex-shrink: 0; max-width: 100%; max-height: 100%; }
   font-weight: 500;
   letter-spacing: 0.5px;
 }
+.candidate-badge {
+  border: 1px solid rgba(245, 158, 11, .35);
+  border-radius: 999px;
+  color: #fbbf24;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 5px 9px;
+  line-height: 1.35;
+  white-space: normal;
+}
+
+.action-btn--candidate { display: inline-flex; align-items: center; gap: 7px; min-height: 44px; padding-inline: 11px; white-space: nowrap; }
+.candidate-stop-banner { padding: 10px 18px; background: rgba(245, 158, 11, .1); border-bottom: 1px solid rgba(245, 158, 11, .25); color: #fcd34d; font-size: 12px; }
+.input-notice--success { color: #6ee7b7; background: rgba(16, 185, 129, .1); }
+ .rate-limit-banner {
+  position: sticky;
+  top: 0;
+  z-index: 2000;
+  padding: 0.7rem 1rem;
+  background: #fff4d6;
+  border-bottom: 1px solid #d99a00;
+  color: #5f4300;
+  font-weight: 600;
+  text-align: center;
+ }

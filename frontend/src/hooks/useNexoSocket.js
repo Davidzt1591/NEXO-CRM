@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import QRCode from 'qrcode';
 import { socket as nexoSocket } from '../lib/nexoSocket';
+import { INVALID_AUTH_CODES, invalidateCurrentSession } from '../lib/authSession';
 
 export function registerNexoSocketHandlers(socket, options) {
   const {
@@ -14,7 +15,6 @@ export function registerNexoSocketHandlers(socket, options) {
     setChatModes,
     setChatSummaries,
     setContacts,
-    setIsAuthenticated,
     setIsImprovingText,
     setIsSummarizing,
     setNewMessage,
@@ -33,6 +33,21 @@ export function registerNexoSocketHandlers(socket, options) {
 
   let active = true;
   let requestedInitialTickets = false;
+  let reconnectTimer = null;
+  let reconnectAttempts = 0;
+  const cancelReconnect = () => {
+    if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  };
+  const scheduleReconnect = () => {
+    if (!active || reconnectTimer !== null || reconnectAttempts >= 5) return;
+    const ceiling = Math.min(8_000, 500 * (2 ** reconnectAttempts));
+    reconnectAttempts += 1;
+    reconnectTimer = window.setTimeout(() => {
+      reconnectTimer = null;
+      if (active && !socket.connected) socket.connect();
+    }, Math.floor(ceiling / 2 + Math.random() * ceiling / 2));
+  };
 
   const cleanupQrTimer = () => {
     clearInterval(qrTimerRef.current);
@@ -48,13 +63,6 @@ export function registerNexoSocketHandlers(socket, options) {
     if (requestedInitialTickets) return;
     requestedInitialTickets = true;
     emitIfActive('get-tickets');
-  };
-
-  const logoutFromSocketError = () => {
-    localStorage.removeItem('nexo_token');
-    setIsAuthenticated(false);
-    setSystemInfo(null);
-    socket.disconnect();
   };
 
   const mergeTicket = (ticket) => {
@@ -75,14 +83,40 @@ export function registerNexoSocketHandlers(socket, options) {
 
   const listeners = [
     ['connect', () => {
+      cancelReconnect();
+      reconnectAttempts = 0;
       setBotStatus('connected');
       requestInitialTickets();
     }],
     ['disconnect', () => setBotStatus('disconnected')],
     ['connect_error', (err) => {
-      console.error('Socket connection error:', err.message);
-      setAuthError('Acceso denegado: Token inválido o revocado.');
-      logoutFromSocketError();
+      const code = err?.data?.code;
+      if (INVALID_AUTH_CODES.has(code)) {
+        cancelReconnect();
+        setAuthError(code === 'AUTH_REVOKED' ? 'Acceso denegado: Token revocado.' : 'Acceso denegado: Token inválido.');
+        invalidateCurrentSession({ code });
+        return;
+      }
+
+      setBotStatus('disconnected');
+      setAuthError(code === 'AUTH_UNAVAILABLE'
+        ? 'El servicio de autenticación no está disponible. Reintentando conexión.'
+        : 'Conexión temporalmente interrumpida. Reintentando.');
+      scheduleReconnect();
+    }],
+    ['auth-error', ({ code } = {}) => {
+      if (INVALID_AUTH_CODES.has(code)) {
+        cancelReconnect();
+        setAuthError(code === 'AUTH_REVOKED' ? 'Acceso denegado: Token revocado.' : 'Acceso denegado: Token inválido.');
+        invalidateCurrentSession({ code });
+        return;
+      }
+      if (code === 'AUTH_UNAVAILABLE') {
+        setBotStatus('disconnected');
+        setAuthError('El servicio de autenticación no está disponible. Reintentando conexión.');
+        socket.disconnect();
+        scheduleReconnect();
+      }
     }],
     ['bot-status', ({ status }) => {
       setBotStatus(status);
@@ -134,11 +168,10 @@ export function registerNexoSocketHandlers(socket, options) {
       setContacts(prev => {
         const next = { ...prev };
         list.forEach(t => {
-          if (!t.telefono) return;
           const key = String(t.id);
           next[key] = {
             ...t,
-            chatId: t.telefono,
+            chatId: t.telefono || null,
             contactKey: key,
             lastMessage: prev[key]?.lastMessage || t.situacion || '',
             lastTimestamp: prev[key]?.lastTimestamp || t.created_at,
@@ -223,6 +256,20 @@ export function registerNexoSocketHandlers(socket, options) {
     }],
     ['ticket-assigned', mergeTicket],
     ['queue-updated', ({ ticket }) => mergeTicket(ticket)],
+    ['ticket-removed', ({ ticketId }) => {
+      const key = String(ticketId);
+      setContacts(prev => { const next = { ...prev }; delete next[key]; return next; });
+      setChatMessages(prev => { const next = { ...prev }; delete next[key]; return next; });
+      setUnread(prev => { const next = { ...prev }; delete next[key]; return next; });
+      setSelectedId(prev => prev === key ? null : prev);
+    }],
+    ['workspace-replaced', () => {
+      setContacts({});
+      setChatMessages({});
+      setUnread({});
+      setSelectedId(null);
+      emitIfActive('get-tickets');
+    }],
     ['sla-alert', ({ ticketId, sla }) => {
       const key = String(ticketId);
       setContacts(prev => prev[key] ? { ...prev, [key]: { ...prev[key], sla } } : prev);
@@ -282,6 +329,7 @@ export function registerNexoSocketHandlers(socket, options) {
 
   return () => {
     active = false;
+    cancelReconnect();
     registeredListeners.forEach(([event, handler]) => socket.off(event, handler));
     cleanupQrTimer();
   };

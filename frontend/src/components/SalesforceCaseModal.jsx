@@ -55,7 +55,6 @@ function AccountLookup({ initialAccount, ticketId, onSelect }) {
   // Fetch suggestions
   useEffect(() => {
     if (!ticketId || selected || debouncedQuery.length < 3) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setResults([]);
       setShowDropdown(false);
       return;
