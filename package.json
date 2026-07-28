@@ -4,14 +4,25 @@
   "description": "Plataforma omnicanal para gestión de chats de WhatsApp con IA",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
+    "runtime:check": "node scripts/check-node-runtime.js",
+    "prestart": "npm run runtime:check && npm run verify:production-deps",
+    "start": "node serve-frontend.js",
+    "start:legacy-server:dev": "node server.js",
+    "start:legacy-bot:dev": "node index.js",
+    "start:frontend": "node serve-frontend.js",
     "dev:backend": "cd backend && nodemon server.js",
     "diagnose": "node scripts/diagnose-nexo.js",
+    "audit:production": "npm audit --omit=dev --omit=optional --audit-level=high",
+    "install:production": "npm ci --omit=dev --omit=optional",
+    "verify:production-deps": "node scripts/verify-production-dependencies.js",
     "test:focused": "node scripts/check-focused-tests.js",
     "test:diagnose": "node --test scripts/*.test.js",
+    "deployment:check": "node scripts/run-deployment-check.js",
     "test:backend": "npm --prefix backend test",
     "test:frontend": "npm --prefix frontend test",
-    "verify": "npm run test:focused && npm run test:diagnose && npm run test:backend && npm run test:frontend",
+    "verify": "npm run runtime:check && npm run verify:checks",
+    "verify:checks": "npm run test:focused && npm run test:diagnose && npm run test:backend && npm run test:frontend",
+    "verify:unsafe-runtime": "node scripts/check-node-runtime.js --unsafe && npm run verify:checks",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [
@@ -24,10 +35,14 @@
   "author": "Magneto - William Zapata",
   "license": "ISC",
   "type": "commonjs",
+  "engines": {
+    "node": ">=22.12 <23",
+    "npm": ">=10 <12"
+  },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
     "@supabase/supabase-js": "^2.99.2",
-    "axios": "^1.13.6",
+    "axios": "1.18.1",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
     "qrcode-terminal": "^0.12.0",
@@ -35,5 +50,25 @@
   },
   "devDependencies": {
     "nodemon": "^3.1.14"
+  },
+  "overrides": {
+    "ws": "8.21.0",
+    "express": {
+      "body-parser": "2.3.0",
+      "qs": "6.15.3"
+    },
+    "router": {
+      "path-to-regexp": "8.4.2"
+    },
+    "basic-ftp": "5.3.1",
+    "form-data": "4.0.6",
+    "ip-address": "10.2.0",
+    "js-yaml": "4.3.0",
+    "whatsapp-web.js": {
+      "archiver": "8.0.0"
+    },
+    "minimatch@10.2.4": {
+      "brace-expansion": "5.0.8"
+    }
   }
 }

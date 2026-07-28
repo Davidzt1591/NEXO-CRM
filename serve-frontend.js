@@ -1,6 +1,12 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const { enforceStartupDependencyTopology } = require('./scripts/dependency-topology');
+
+enforceStartupDependencyTopology({
+  repositoryRoot: __dirname,
+  runtimeDirectories: [__dirname, path.join(__dirname, 'backend')],
+});
 
 const PORT = 5173;
 const DIST = path.resolve(__dirname, 'frontend', 'dist');

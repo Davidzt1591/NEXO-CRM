@@ -6,6 +6,8 @@ yarn-debug.log*
 yarn-error.log*
 
 # Runtime data
+.runtime/
+frontend/dist.backup-admin-token-20260727-2225/
 pids/
 *.pid
 *.seed

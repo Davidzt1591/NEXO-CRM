@@ -222,7 +222,7 @@ function checkPm2() {
       add('WARN', 'PM2 status', 'PM2 is available, but no nexo-* process was found.');
     }
   } catch (error) {
-    add('SKIPPED', 'PM2 status', `PM2 jlist was not available or did not respond within ${TIMEOUT_MS}ms. No process was restarted.`);
+    add('SKIPPED', 'PM2 status', `PM2 jlist was not available or did not respond within ${TIMEOUT_MS}ms. No process-control command was issued.`);
   }
 }
 

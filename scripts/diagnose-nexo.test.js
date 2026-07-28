@@ -190,6 +190,28 @@ test('performs only read-only operational calls', async () => {
   }
 });
 
+test('describes unavailable PM2 without process-control command words', async () => {
+  const server = await listen((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(req.url === '/health' ? JSON.stringify({ status: 'ok' }) : JSON.stringify([]));
+  });
+  const emptyPath = fs.mkdtempSync(path.join(os.tmpdir(), 'nexo-diag-empty-path-'));
+
+  try {
+    const result = await runDiagnose(['--json', '--base-url', server.baseUrl], { pathEnv: emptyPath });
+    const report = JSON.parse(result.stdout);
+    const pm2Result = report.results.find(item => item.name === 'PM2 status');
+
+    assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`);
+    assert.equal(pm2Result.status, 'SKIPPED');
+    assert.doesNotMatch(pm2Result.detail, /\b(?:start|stop|restart|reload|delete|kill)\w*\b/i);
+    assert.match(pm2Result.detail, /No process-control command was issued/);
+  } finally {
+    await server.close();
+    fs.rmSync(emptyPath, { recursive: true, force: true });
+  }
+});
+
 test('builds Windows npm test command through cmd.exe instead of executing npm.cmd directly', () => {
   const command = buildNpmCommand(['test'], {
     platform: 'win32',

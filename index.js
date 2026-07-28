@@ -1,3 +1,16 @@
+if (process.env.NODE_ENV === 'production') {
+    console.error('LEGACY_ENTRYPOINT_DISABLED');
+    process.exit(78);
+}
+
+const path = require('node:path');
+const { enforceStartupDependencyTopology } = require('./scripts/dependency-topology');
+enforceStartupDependencyTopology({
+    repositoryRoot: __dirname,
+    runtimeDirectories: [__dirname, path.join(__dirname, 'backend')],
+});
+const { assertLocalAuthOnly } = require('./backend/src/services/whatsapp/authPolicy');
+assertLocalAuthOnly();
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const { GoogleGenerativeAI } = require('@google/generative-ai');

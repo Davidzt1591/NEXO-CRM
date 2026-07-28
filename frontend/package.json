@@ -3,14 +3,22 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=22.12 <23",
+    "npm": ">=10 <12"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "audit:production": "npm audit --omit=dev --omit=optional --audit-level=high",
+    "audit:build": "npm audit --audit-level=high",
     "lint": "eslint .",
     "test": "vitest run",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@fontsource/lato": "^5.3.0",
+    "@xyflow/react": "12.11.2",
     "emoji-picker-react": "^4.18.0",
     "lucide-react": "^1.7.0",
     "qrcode": "^1.5.4",
@@ -20,19 +28,22 @@
     "zustand": "^5.0.12"
   },
   "devDependencies": {
-    "@eslint/js": "^9.39.4",
+    "@eslint/js": "^10.0.1",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.1",
-    "eslint": "^9.39.4",
-    "eslint-plugin-react-hooks": "^7.0.1",
+    "eslint": "^10.8.0",
+    "eslint-plugin-react-hooks": "^7.1.1-canary-d5736f09-20260507",
     "eslint-plugin-react-refresh": "^0.5.2",
     "globals": "^17.4.0",
     "jsdom": "^29.1.1",
     "vite": "^8.0.1",
     "vitest": "^4.1.10"
+  },
+  "overrides": {
+    "ws": "8.21.0"
   }
 }

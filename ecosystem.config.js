@@ -1,5 +1,5 @@
 const enableBackendWatch = process.env.PM2_WATCH_BACKEND === 'true';
-const useSystemCa = process.env.PM2_USE_SYSTEM_CA === 'true';
+const nodeInterpreter = process.env.NEXO_NODE22 || process.execPath;
 
 module.exports = {
   apps: [
@@ -7,7 +7,8 @@ module.exports = {
       name: 'nexo-backend',
       script: 'server.js',
       cwd: './backend',
-      node_args: useSystemCa ? ['--use-system-ca'] : [],
+      interpreter: nodeInterpreter,
+      node_args: ['--use-system-ca'],
       instances: 1,
       autorestart: true,
       watch: enableBackendWatch ? ['server.js', 'src', 'scripts'] : false,
@@ -28,7 +29,7 @@ module.exports = {
       env: {
         NODE_ENV: 'development',
         PM2_WATCH_BACKEND: 'false',
-        PM2_USE_SYSTEM_CA: 'false',
+        PM2_USE_SYSTEM_CA: 'true',
       },
       env_development: {
         NODE_ENV: 'development',
@@ -37,8 +38,13 @@ module.exports = {
       },
       env_production: {
         NODE_ENV: 'production',
+        ALLOWED_ORIGINS: 'http://localhost:5173',
+        HOST: '127.0.0.1',
+        ALLOW_INSECURE_LOCAL_COOKIE: 'true',
+        SESSION_COOKIE_SECURE: 'false',
+        TRUST_PROXY_CIDRS: '',
         PM2_WATCH_BACKEND: 'false',
-        PM2_USE_SYSTEM_CA: 'false',
+        PM2_USE_SYSTEM_CA: 'true',
       },
       error_file: './logs/pm2-error.log',
       out_file: './logs/pm2-out.log',
@@ -49,9 +55,13 @@ module.exports = {
       name: 'nexo-frontend',
       script: 'serve-frontend.js',
       cwd: './',
+      interpreter: nodeInterpreter,
       instances: 1,
       autorestart: true,
       max_memory_restart: '200M',
+      env_production: {
+        NODE_ENV: 'production',
+      },
     }
   ]
 };

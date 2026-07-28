@@ -2,8 +2,9 @@ name: CI
 
 on:
   pull_request:
+    branches: [master, main]
   push:
-    branches: [main]
+    branches: [master, main]
 
 jobs:
   verify:
@@ -15,18 +16,21 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22.23.1
           cache: npm
           cache-dependency-path: |
             package-lock.json
             backend/package-lock.json
             frontend/package-lock.json
 
+      - name: Enforce release runtime
+        run: npm run runtime:check
+
       - name: Install root dependencies
-        run: npm ci
+        run: npm ci --omit=optional
 
       - name: Install backend dependencies
-        run: npm ci
+        run: npm ci --omit=optional
         working-directory: backend
 
       - name: Install frontend dependencies
@@ -35,3 +39,57 @@ jobs:
 
       - name: Run safe verification gates
         run: npm run verify
+
+      - name: Audit frontend build dependency topology
+        run: npm run audit:build
+        working-directory: frontend
+
+  production-topology:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.1
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            backend/package-lock.json
+            frontend/package-lock.json
+      - name: Install optional-free production runtimes
+        run: npm ci --omit=dev --omit=optional && npm --prefix backend ci --omit=dev --omit=optional
+      - name: Audit and prove both production topologies
+        run: npm run audit:production && npm --prefix backend run audit:production && npm run verify:production-deps
+      - name: Run production-runtime startup and authentication tests
+        run: node --test scripts/dependency-topology.test.js backend/test/whatsappAuthPolicy.test.js backend/test/startupHydration.test.js backend/test/sessionSecurity.test.js backend/test/sessionRoutes.test.js backend/test/socketAuth.test.js backend/test/socketAuthState.test.js
+      - name: Audit static frontend runtime topology
+        run: npm run audit:production
+        working-directory: frontend
+
+  deployment-preflight-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.1
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+      - name: Install root dependencies
+        run: npm ci --omit=optional
+      - name: Install frontend build dependencies
+        run: npm ci
+        working-directory: frontend
+      - name: Build static frontend artifact
+        run: npm run build
+        working-directory: frontend
+      - name: Validate deployment preflight through public wrapper
+        run: npm run deployment:check
+      - name: Run release failure-contract tests
+        shell: pwsh
+        run: node --test scripts/release-contract.test.js

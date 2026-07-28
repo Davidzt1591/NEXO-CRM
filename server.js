@@ -1,3 +1,14 @@
+if (process.env.NODE_ENV === 'production') {
+  console.error('LEGACY_ENTRYPOINT_DISABLED');
+  process.exit(78);
+}
+
+const path = require('node:path');
+const { enforceStartupDependencyTopology } = require('./scripts/dependency-topology');
+enforceStartupDependencyTopology({
+  repositoryRoot: __dirname,
+  runtimeDirectories: [__dirname, path.join(__dirname, 'backend')],
+});
 require('dotenv').config();
 const express = require('express');
 const supabase = require('./src/config/supabase');
