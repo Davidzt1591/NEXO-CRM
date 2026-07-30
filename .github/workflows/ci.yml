@@ -86,7 +86,7 @@ jobs:
         run: npm ci
         working-directory: frontend
       - name: Build static frontend artifact
-        run: npm run build "${{ runner.temp }}\frontend-dist"
+        run: npm run build "${{ runner.temp }}/frontend-dist"
         working-directory: frontend
       - name: Validate deployment preflight through public wrapper
         run: npm run deployment:check -- -FrontendDistPath "${{ runner.temp }}/frontend-dist"
