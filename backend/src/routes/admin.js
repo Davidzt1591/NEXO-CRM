@@ -14,38 +14,25 @@ const routing = require('../services/routing');
 const salesforceOutbox = require('../services/salesforceOutbox');
 const { disconnectSocketsForToken, emitRoutingUpdate } = require('../socket');
 const ticketPostProcessing = require('../services/ticketPostProcessing');
+const {
+  requireText,
+  requirePatchBody,
+  optionalAreaId,
+  optionalPositiveInteger,
+  requiredPositiveInteger,
+  optionalInteger,
+  optionalBoolean,
+  requireExactBody,
+  requireEmptyBody,
+  isUniqueViolation,
+  mapUniqueViolation,
+} = require('../utils/validate');
 
 const asyncHandler = fn => (req, res) =>
   fn(req, res).catch(e => {
     console.error('Admin Route Error:', e.message);
     res.status(e.statusCode || 500).json({ error: e.message });
   });
-
-function isUniqueViolation(error) {
-  return error?.code === '23505' || /duplicate key value|unique constraint|unique violation/i.test(error?.message || '');
-}
-
-async function mapBotFlowWriteConflict(operation) {
-  try {
-    return await operation();
-  } catch (err) {
-    if (isUniqueViolation(err)) {
-      const conflict = new Error('A bot flow step already exists for this version, area, and step key.');
-      conflict.statusCode = 409;
-      throw conflict;
-    }
-    throw err;
-  }
-}
-
-function requireText(value, field) {
-  if (!value || typeof value !== 'string' || !value.trim()) {
-    const err = new Error(`${field} is required.`);
-    err.statusCode = 400;
-    throw err;
-  }
-  return value.trim();
-}
 
 function candidateSettingsPayload(body) {
   const formUrl = typeof body?.formUrl === 'string' ? body.formUrl.trim() : '';
@@ -59,71 +46,6 @@ function candidateSettingsPayload(body) {
   }
   if (message.length > 1000) throw Object.assign(new Error('message must not exceed 1000 characters.'), { statusCode: 400 });
   return { formUrl, message };
-}
-
-function requirePatchBody(body, allowedFields) {
-  if (!body || typeof body !== 'object' || Array.isArray(body)) {
-    const err = new Error('PATCH body must be a JSON object.');
-    err.statusCode = 400;
-    throw err;
-  }
-
-  const validKeys = Object.keys(body).filter(key => allowedFields.includes(key));
-  if (validKeys.length === 0) {
-    const err = new Error(`PATCH body must include at least one valid field: ${allowedFields.join(', ')}.`);
-    err.statusCode = 400;
-    throw err;
-  }
-}
-
-function optionalAreaId(value, field) {
-  if (value === undefined || value === null || value === '') return null;
-  if (!Number.isInteger(Number(value)) || Number(value) <= 0 || String(value).trim() !== String(Number(value))) {
-    const err = new Error(`${field} must be a positive integer.`);
-    err.statusCode = 400;
-    throw err;
-  }
-  return Number(value);
-}
-
-function optionalPositiveInteger(value, field) {
-  if (value === undefined || value === null || value === '') return undefined;
-  if (!Number.isInteger(Number(value)) || Number(value) <= 0 || String(value).trim() !== String(Number(value))) {
-    const err = new Error(`${field} must be a positive integer.`);
-    err.statusCode = 400;
-    throw err;
-  }
-  return Number(value);
-}
-
-function requiredPositiveInteger(value, field) {
-  const normalized = optionalPositiveInteger(value, field);
-  if (normalized === undefined) {
-    const err = new Error(`${field} is required.`);
-    err.statusCode = 400;
-    throw err;
-  }
-  return normalized;
-}
-
-function optionalInteger(value, field) {
-  if (value === undefined || value === null || value === '') return undefined;
-  if (!Number.isInteger(Number(value)) || String(value).trim() !== String(Number(value))) {
-    const err = new Error(`${field} must be an integer.`);
-    err.statusCode = 400;
-    throw err;
-  }
-  return Number(value);
-}
-
-function optionalBoolean(value, field) {
-  if (value === undefined || value === null || value === '') return undefined;
-  if (typeof value === 'boolean') return value;
-  if (value === 'true') return true;
-  if (value === 'false') return false;
-  const err = new Error(`${field} must be true or false.`);
-  err.statusCode = 400;
-  throw err;
 }
 
 function normalizeBotFlowPayload(body, { partial = false } = {}) {
@@ -194,20 +116,6 @@ async function requireTokenAudit(req, action, targetId, metadata) {
   });
   if (!result) throw new Error('Token audit was not persisted.');
   return result;
-}
-
-function requireExactBody(body, allowedFields) {
-  if (!body || typeof body !== 'object' || Array.isArray(body)) throw Object.assign(new Error('Request body must be a JSON object.'), { statusCode: 400 });
-  const keys = Object.keys(body);
-  if (keys.length !== allowedFields.length || keys.some(key => !allowedFields.includes(key))) {
-    throw Object.assign(new Error(`Request body must contain exactly: ${allowedFields.join(', ')}.`), { statusCode: 400 });
-  }
-}
-
-function requireEmptyBody(body) {
-  if (body !== undefined && (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length > 0)) {
-    throw Object.assign(new Error('Request body must be empty.'), { statusCode: 400 });
-  }
 }
 
 function emitRoutingFromRequest(req, ticket, options = {}) {
@@ -698,7 +606,7 @@ router.post('/bot-flows', asyncHandler(async (req, res) => {
   const payload = normalizeBotFlowPayload(req.body);
   await assertUniqueBotFlowStep(payload);
 
-  const flow = await mapBotFlowWriteConflict(() => db.createBotFlowStep(payload));
+  const flow = await mapUniqueViolation(() => db.createBotFlowStep(payload), 'A bot flow step already exists for this version, area, and step key.');
   botFlow.invalidateBotFlowCache();
   await audit(req, 'flow.created', flow.id, {
     version_id: flow.version_id,
@@ -722,7 +630,7 @@ router.patch('/bot-flows/:id', asyncHandler(async (req, res) => {
   const next = { ...existing, ...changes };
   await assertUniqueBotFlowStep(next, req.params.id);
 
-  const flow = await mapBotFlowWriteConflict(() => db.updateBotFlowStep(req.params.id, changes));
+  const flow = await mapUniqueViolation(() => db.updateBotFlowStep(req.params.id, changes), 'A bot flow step already exists for this version, area, and step key.');
   botFlow.invalidateBotFlowCache();
   await audit(req, 'flow.updated', flow.id, changes);
   res.json(flow);

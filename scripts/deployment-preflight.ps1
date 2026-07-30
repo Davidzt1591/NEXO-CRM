@@ -13,7 +13,8 @@ param(
   [string]$RuntimeInspectionFixturePath = "",
   [switch]$ValidateRunningServices,
   [switch]$RequirePm2Node22,
-  [switch]$CheckOnly
+  [switch]$CheckOnly,
+  [string]$FrontendDistPath = ""
 )
 
 $ErrorActionPreference = 'Stop'
@@ -125,8 +126,9 @@ if ($CheckOnly) {
     $localExact = $resolvedEnvironment['HOST'] -eq '127.0.0.1' -and $resolvedEnvironment['ALLOWED_ORIGINS'] -eq 'http://localhost:5173' -and $resolvedEnvironment['ALLOW_INSECURE_LOCAL_COOKIE'] -eq 'true' -and $resolvedEnvironment['SESSION_COOKIE_SECURE'] -eq 'false' -and $resolvedEnvironment['TRUST_PROXY_CIDRS'] -eq ''
     if (-not $localExact) { throw 'LocalLoopback static topology must exactly match the approved ecosystem configuration.' }
   }
-  foreach ($path in @('frontend\package-lock.json', 'frontend\dist\index.html')) {
-    if (-not (Test-Path -LiteralPath (Join-Path $RepoRoot $path) -PathType Leaf)) { throw "Missing deployment artifact: $path" }
+  $frontendDistCheck = if ($FrontendDistPath) { Join-Path $FrontendDistPath 'index.html' } else { Join-Path $RepoRoot 'frontend\dist\index.html' }
+  foreach ($checkPath in @((Join-Path $RepoRoot 'frontend\package-lock.json'), $frontendDistCheck)) {
+    if (-not (Test-Path -LiteralPath $checkPath -PathType Leaf)) { throw "Missing deployment artifact: $checkPath" }
   }
   Write-Host 'Deployment preflight static contract, topology, and artifact check passed. CheckOnly performed no PM2 or live predecessor checks.'
   exit 0

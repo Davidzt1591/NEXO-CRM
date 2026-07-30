@@ -266,6 +266,7 @@ function setupSockets(io, client, borrarSesion) {
     socket.on('toggle-mode', async ({ chatId, mode }) => {
       if (!requireAdminSocket(socket)) return;
       store.chatModes.set(chatId, mode);
+      store.persistPreference(chatId, { mode }); // fire-and-forget, no await
       await emitAdminChatOperation(io, 'mode-changed', { chatId, mode }, chatId);
       console.log(`🔄 Modo [${chatId}] → ${mode}`);
     });
@@ -274,12 +275,14 @@ function setupSockets(io, client, borrarSesion) {
     socket.on('silence-chat', async (chatId) => {
       if (!requireAdminSocket(socket)) return;
       store.silenciados.add(chatId);
+      store.persistPreference(chatId, { silenced: true }); // fire-and-forget
       await emitAdminChatOperation(io, 'chat-silenced', { chatId }, chatId);
     });
 
     socket.on('unsilence-chat', async (chatId) => {
       if (!requireAdminSocket(socket)) return;
       store.silenciados.delete(chatId);
+      store.persistPreference(chatId, { silenced: false }); // fire-and-forget
       await emitAdminChatOperation(io, 'chat-unsilenced', { chatId }, chatId);
     });
 
@@ -474,6 +477,7 @@ function setupSockets(io, client, borrarSesion) {
       if (ticketId) {
         await db.deleteTicket(ticketId);
       }
+      store.deletePreference(contactKey); // fire-and-forget
       emitMinimalAreaOperation(io, 'chat-deleted', { ticketId }, areaId);
     });
 

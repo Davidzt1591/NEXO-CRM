@@ -1481,13 +1481,69 @@ function markSalesforceOutboxJobFailed(id, workerId, errorCode, processedAt = ne
   }, 'mark failed');
 }
 
-// Mock closing for Supabase (no active connections/intervals to clear like SQLite)
-function initDb() { return Promise.resolve(true); }
+/**
+ * Verify the Supabase connection is working by running a lightweight health check.
+ * Uses `head: true` with `count: 'exact'` on the `tickets` table — a metadata-only
+ * query that confirms the client is configured, authenticated, and can reach the
+ * database without fetching any rows.
+ *
+ * A 10-second timeout prevents boot from hanging on network issues.
+ * @returns {Promise<true>} Resolves with `true` when the connection is verified.
+ * @throws {Error} If the check fails or times out — boot sequence will stop.
+ */
+async function initDb() {
+  const TIMEOUT_MS = 10_000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+
+  try {
+    const { error } = await supabase
+      .from('tickets')
+      .select('*', { count: 'exact', head: true })
+      .abortSignal(controller.signal);
+
+    if (error) {
+      console.error('❌ Supabase connection check failed:', error.message);
+      throw new Error(`Supabase connection check failed: ${error.message}`);
+    }
+
+    console.log('✅ Supabase connection verified successfully.');
+    return true;
+  } catch (err) {
+    if (controller.signal.aborted) {
+      const timeoutError = new Error(`Supabase connection check timed out after ${TIMEOUT_MS / 1000}s`);
+      timeoutError.code = 'DB_TIMEOUT';
+      console.error('❌', timeoutError.message);
+      throw timeoutError;
+    }
+    // If it's already wrapped, re-throw as-is
+    if (err instanceof Error && err.message.startsWith('Supabase connection check failed')) {
+      throw err;
+    }
+    console.error('❌ Supabase connection check threw unexpectedly:', err.message || err);
+    throw new Error(`Supabase connection check failed: ${err.message || 'unknown error'}`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Supabase persists data automatically — no manual persist step is needed.
+ * Kept as a no-op for interface compatibility (called in boot sequences).
+ */
 function persistDb() { return Promise.resolve(true); }
+
+/**
+ * Supabase manages its own HTTP connection pool — no explicit close is required
+ * in normal operation. Idle connections are cleaned up by Node's garbage collector
+ * or on process exit.
+ * Kept as a no-op for interface compatibility.
+ */
 function closeDb() { return Promise.resolve(true); }
 
 module.exports = {
   initDb,
+  supabase,
   persistDb,
   closeDb,
   // Tickets
