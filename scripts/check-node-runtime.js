@@ -15,13 +15,18 @@ function detectNpmVersion() {
 
 const npmVersion = detectNpmVersion();
 const npmMajor = npmVersion ? Number(npmVersion.split('.')[0]) : NaN;
-const supported = process.versions.node === RELEASE_NODE
+const [nodeMajor, nodeMinor] = process.versions.node.split('.').map(Number);
+// CI and local verification accept any Node 22.x (matching package.json engines: >=22.12 <23).
+// The strict exact-version check (RELEASE_NODE) is enforced only at production deployment time
+// by deployment-preflight.ps1 and deployment-contract.js.
+const supported = nodeMajor === 22
+  && nodeMinor >= 12
   && npmMajor >= 10
   && npmMajor < 12;
 const unsafe = process.argv.includes('--unsafe');
 
 if (!supported) {
-  const message = `[runtime] Unsupported runtime: Node.js ${process.version}, npm ${npmVersion || 'unknown'}. NEXO release verification requires Node.js ${RELEASE_NODE} exactly and npm >=10 <12.`;
+  const message = `[runtime] Unsupported runtime: Node.js ${process.version}, npm ${npmVersion || 'unknown'}. NEXO release verification requires Node.js >=22.12 <23 and npm >=10 <12.`;
   if (unsafe) {
     console.warn(`${message} Continuing ONLY because --unsafe was explicitly requested for local diagnosis.`);
   } else {
