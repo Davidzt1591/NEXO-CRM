@@ -39,7 +39,7 @@ if (!validRoles.includes(role)) {
 
 (async () => {
   try {
-    // 1. Initialize SQLite Database
+    // 1. Verify Supabase connection
     await initDb();
 
     // 2. Generate and save token

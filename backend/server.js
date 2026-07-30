@@ -100,23 +100,27 @@ app.set('io', io);
 
 const PORT = process.env.PORT || 3001;
 
+const store               = require('./src/store');
 const { initDb }           = require('./src/database/db');
 const { startCleanupCron } = require('./src/database/cleanup');
 
 // ── Boot sequence ─────────────────────────────────────────────────────────
 (async () => {
-  // 1. Initialize SQLite DB (creates tables if not exist)
+  // 1. Verify Supabase connection
   await initDb();
 
   // 2. Start nightly cleanup cron
   startCleanupCron();
 
-  // 3. Expose degraded health while persisted sessions are hydrated.
+  // 3. Restore persisted chat preferences before WhatsApp starts processing messages
+  await store.restorePreferences();
+
+  // 4. Expose degraded health while persisted sessions are hydrated.
   server.listen(PORT, securityConfig.host, () => {
     console.log(`\n🚀 NEXO Backend corriendo en puerto ${PORT}`);
   });
 
-  // 4. WhatsApp processing starts only after durable session hydration succeeds.
+  // 5. WhatsApp processing starts only after durable session hydration succeeds.
   await hydrateThenStart({
     hydrate: loadSessionsFromDb,
     state: startupState,

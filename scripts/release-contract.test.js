@@ -26,7 +26,7 @@ test('root start targets only the static frontend', () => {
   assert.doesNotMatch(manifest.scripts.start, /server\.js/);
 });
 
-for (const entrypoint of ['server.js', 'index.js']) test(`${entrypoint} refuses production before initialization`, () => {
+for (const entrypoint of ['legacy/server.js', 'legacy/index.js']) test(`${entrypoint} refuses production before initialization`, () => {
   const result = spawnSync(process.execPath, [entrypoint], { cwd: root, env: { ...process.env, NODE_ENV: 'production' }, encoding: 'utf8', timeout: 5000 });
   assert.equal(result.status, 78);
   assert.match(result.stderr, /^LEGACY_ENTRYPOINT_DISABLED\s*$/);

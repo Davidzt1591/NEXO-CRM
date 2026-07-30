@@ -127,7 +127,7 @@ test('production startup refuses a resolvable excluded package while development
 });
 
 test('root legacy production entrypoint refuses before topology, dotenv, or listen', () => {
-  const result = runEntrypointWithMockedBoundary('server.js', 'unsafe');
+  const result = runEntrypointWithMockedBoundary('legacy/server.js', 'unsafe');
 
   assert.notEqual(result.status, 0, `${result.stdout}\n${result.stderr}`);
   assert.doesNotMatch(result.stdout, /DOTENV_BOUNDARY_REACHED/);
@@ -135,7 +135,7 @@ test('root legacy production entrypoint refuses before topology, dotenv, or list
 });
 
 test('root legacy production entrypoint remains disabled when topology is clean', () => {
-  const result = runEntrypointWithMockedBoundary('server.js', 'clean');
+  const result = runEntrypointWithMockedBoundary('legacy/server.js', 'clean');
 
   assert.equal(result.status, 78, `${result.stdout}\n${result.stderr}`);
   assert.doesNotMatch(result.stdout, /DOTENV_BOUNDARY_REACHED/);
