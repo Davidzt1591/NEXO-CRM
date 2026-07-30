@@ -99,4 +99,4 @@ jobs:
         run: npm run deployment:check
       - name: Run release failure-contract tests
         shell: pwsh
-        run: node --test scripts/release-contract.test.js
+        run: node --test --test-timeout=180000 scripts/release-contract.test.js
