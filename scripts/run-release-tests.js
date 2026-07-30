@@ -12,10 +12,14 @@ const result = cp.spawnSync(
   ['--test', '--test-timeout=180000', testFile],
   {
     cwd: root,
-    stdio: 'inherit',
+    stdio: ['inherit', 'pipe', 'pipe'],
     timeout: 300000,
     shell: false,
   }
 );
+
+// Forward captured output
+if (result.stdout) process.stdout.write(result.stdout);
+if (result.stderr) process.stderr.write(result.stderr);
 
 process.exit(typeof result.status === 'number' && result.status >= 0 ? result.status : 1);
