@@ -16,6 +16,13 @@ const hasPwsh = process.platform === 'win32' ? true : (() => {
   catch { return false; }
 })();
 
+// Skip pwsh-dependent deployment-contract tests when the frontend dist is missing,
+// since CheckOnly mode validates deployment artifacts including frontend/dist/index.html.
+// This prevents failures when release-contract.test.js is run as part of `npm run verify`
+// without a prior frontend build (e.g. CI verify job).
+const hasFrontendDist = fs.existsSync(path.join(root, 'frontend', 'dist', 'index.html'));
+const canRunDeploymentTests = hasPwsh && hasFrontendDist;
+
 function runPreflight(args, options = {}) {
   return spawnSync(powershell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', preflight, ...args], {
     cwd: options.cwd || root,
@@ -25,8 +32,10 @@ function runPreflight(args, options = {}) {
   });
 }
 
-// Skip all pwsh-dependent tests when PowerShell Core is not available.
-const pwshDescribe = hasPwsh ? describe : describe.skip;
+// Skip pwsh-dependent deployment tests when PowerShell Core or the built frontend dist is unavailable.
+// The deployment-preflight CI job builds the frontend before running these tests, while the verify
+// CI job skips them because npm run test:diagnose runs all scripts/*.test.js without a prior build.
+const pwshDescribe = canRunDeploymentTests ? describe : describe.skip;
 
 function output(result) { return `${result.stdout || ''}\n${result.stderr || ''}`; }
 
