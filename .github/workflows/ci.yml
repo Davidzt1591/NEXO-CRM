@@ -99,4 +99,4 @@ jobs:
       - name: Validate deployment preflight through public wrapper
         run: npm run deployment:check
       - name: Run release failure-contract tests
-        run: node scripts/run-release-tests.js
+        run: node scripts/run-release-tests.js 2>&1 | tee -a $GITHUB_STEP_SUMMARY

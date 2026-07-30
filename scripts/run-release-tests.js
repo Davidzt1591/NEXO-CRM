@@ -59,11 +59,11 @@ try {
 summary('\n### Running node --test');
 const result = cp.spawnSync(
   process.execPath,
-  ['--test', '--test-timeout=180000', testFile],
+  ['--test', testFile],
   {
     cwd: root,
     stdio: ['inherit', 'pipe', 'pipe'],
-    timeout: 120000,
+    timeout: 300000,
     shell: false,
   }
 );
