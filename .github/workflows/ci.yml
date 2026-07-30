@@ -99,5 +99,4 @@ jobs:
       - name: Validate deployment preflight through public wrapper
         run: npm run deployment:check
       - name: Run release failure-contract tests
-        shell: bash
-        run: node --test --test-timeout=180000 --test-concurrency=1 scripts/release-contract.test.js 2>&1; echo "EXIT:$?"
+        run: node -e "console.log('NODE', process.version, 'PLATFORM', process.platform, 'PWSH:', require('child_process').spawnSync('pwsh',['-NoProfile','-Command','echo ok'],{timeout:5000,encoding:'utf8'}).stdout)" && node --test --test-timeout=180000 scripts/release-contract.test.js
